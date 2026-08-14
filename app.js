@@ -16,9 +16,9 @@ const MODE_PENALTY_MULTIPLIER = 20;
 
 let currentMode = 'walk';
 let originCoord = null;
-let destCoord = null;       // fallback point (centroid, or landmark's own point) — used when no access point exists
+let destCoord = null;
 let destName = null;
-let destBuildingId = null;  // NEW: OBJECTID of the selected building, used to look up its access points
+let destBuildingId = null;
 
 let arrivalTarget = null;
 
@@ -31,8 +31,6 @@ const SNAP_RADIUS_METERS = 40;
 const SNAP_MAX_CANDIDATES = 10;
 
 let buildingList = [];
-
-// NEW: building_i -> array of [lng, lat] access point coordinates
 let accessPointsByBuilding = {};
 
 let userMarker = null;
@@ -58,16 +56,71 @@ let dataReady = {
   accessPoints: false
 };
 
+// NEW: animated "flow" dash pattern for the route line, cycling
+// through a sequence so the line appears to move toward the
+// destination — purely visual, no effect on the actual route data.
+const DASH_ANIMATION_SEQUENCE = [
+  [0, 4, 3],
+  [0.5, 4, 2.5],
+  [1, 4, 2],
+  [1.5, 4, 1.5],
+  [2, 4, 1],
+  [2.5, 4, 0.5],
+  [3, 4, 0],
+  [0, 0.3, 3, 3.7],
+  [0, 0.6, 3, 3.4],
+  [0, 0.9, 3, 3.1],
+  [0, 1.2, 3, 2.8],
+  [0, 1.5, 3, 2.5],
+  [0, 1.8, 3, 2.2],
+  [0, 2.1, 3, 1.9],
+  [0, 2.4, 3, 1.6],
+  [0, 2.7, 3, 1.3],
+  [0, 3, 3, 1]
+];
+let dashStep = 0;
+
 
 function normalizeName(name) {
   if (!name) return name;
   return name.trim().replace(/\s+/g, ' ');
 }
 
+// NEW: picks a Mapbox Standard-style light preset based on the real
+// local time, and applies it once on load — buildings render with
+// dawn/day/dusk/night lighting to match the actual time of day.
+function applyTimeOfDayLighting() {
+  const hour = new Date().getHours();
+  let preset;
+  if (hour >= 5 && hour < 8) preset = 'dawn';
+  else if (hour >= 8 && hour < 18) preset = 'day';
+  else if (hour >= 18 && hour < 20) preset = 'dusk';
+  else preset = 'night';
+
+  map.setConfigProperty('basemap', 'lightPreset', preset);
+  console.log(`[Lighting] Applied "${preset}" light preset based on local time (${hour}:00).`);
+}
+
+// NEW: advances the dash pattern on a timer, applied to both route
+// line layers — this is what creates the flowing/moving line effect.
+function startRouteAnimation() {
+  setInterval(() => {
+    dashStep = (dashStep + 1) % DASH_ANIMATION_SEQUENCE.length;
+    const pattern = DASH_ANIMATION_SEQUENCE[dashStep];
+    if (map.getLayer('route-line-solid')) {
+      map.setPaintProperty('route-line-solid', 'line-dasharray', pattern);
+    }
+    if (map.getLayer('route-line-dashed')) {
+      map.setPaintProperty('route-line-dashed', 'line-dasharray', pattern);
+    }
+  }, 60);
+}
+
 
 map.on('load', () => {
 
   map.setConfigProperty('basemap', 'show3dObjects', false);
+  applyTimeOfDayLighting(); // NEW
 
   map.addSource('campus-paths', {
     type: 'geojson',
@@ -124,10 +177,11 @@ map.on('load', () => {
     paint: {
       'line-color': '#f57c00',
       'line-width': 6,
-      'line-opacity': 0.95,
-      'line-dasharray': [2, 2]
+      'line-opacity': 0.95
     }
   });
+
+  startRouteAnimation(); // NEW
 
   fetch('data/data/data/Buildings.geojson')
     .then(res => {
@@ -159,8 +213,6 @@ map.on('load', () => {
         }
       });
 
-      // CHANGED: clicking a building now also captures its OBJECTID
-      // (destBuildingId), used to look up its access points.
       map.on('click', 'buildings-3d', (e) => {
         if (!dataReady.buildings || !dataReady.network) return;
 
@@ -238,9 +290,6 @@ map.on('load', () => {
         map.getCanvas().style.cursor = '';
       });
 
-      // Landmarks have no building link — they route to their own
-      // point directly, same as before. No 'id' field, so the access
-      // point lookup naturally falls through to this fallback.
       const landmarkEntries = data.features
         .filter(f => f.properties.Name)
         .map(f => ({ name: f.properties.Name, coord: f.geometry.coordinates }));
@@ -257,10 +306,6 @@ map.on('load', () => {
       checkAllDataReady();
     });
 
-  // NEW: fetch AccessPoints.geojson. Only 'building_i' is used to link
-  // to a building's OBJECTID — the 'Name' property here (a shop/tenant
-  // name) is deliberately never compared against building names, which
-  // is what caused the earlier mismatch (e.g. Engineering -> Block B).
   fetch('data/data/data/AccessPoints.geojson')
     .then(res => {
       if (!res.ok) throw new Error(`Server responded with ${res.status}`);
@@ -281,8 +326,6 @@ map.on('load', () => {
     })
     .catch(err => {
       console.error('Failed to load AccessPoints.geojson:', err);
-      // Non-fatal — buildings without access point data still work via
-      // centroid fallback, so this doesn't block the app from loading.
       dataReady.accessPoints = true;
       checkAllDataReady();
     });
@@ -580,8 +623,6 @@ function checkNavigationProgress(liveCoord) {
 }
 
 
-// CHANGED: now also captures each building's OBJECTID as 'id', so
-// selecting a destination from search can look up its access points.
 function extractNamedLocations(geojson) {
   const results = [];
 
@@ -623,7 +664,7 @@ destInput.addEventListener('input', () => {
       destInput.value = match.name;
       destCoord = match.coord;
       destName = match.name;
-      destBuildingId = match.id; // undefined for landmarks — falls back correctly
+      destBuildingId = match.id;
       suggestionsBox.innerHTML = '';
       highlightDestination(match.name);
     });
@@ -784,12 +825,6 @@ function calculateWeightedMinutes(routeCoords, edgeRealArray, mode) {
   return Math.max(1, Math.round(totalSeconds / 60));
 }
 
-// CHANGED: now tries every real access point belonging to the selected
-// building (via destBuildingId -> accessPointsByBuilding), on top of
-// multiple nearby graph-node candidates as before, keeping whichever
-// combination produces the smallest genuine ON-NETWORK trip. Falls
-// back to destCoord (centroid or landmark point) automatically when no
-// access point is recorded for that building.
 function calculateAndDrawRoute() {
   const graph = networkGraph;
 
@@ -834,11 +869,6 @@ function calculateAndDrawRoute() {
     return;
   }
 
-  // bestRoute is EXACTLY what findShortestPath returned — nothing
-  // appended before or after it. The route can never leave the
-  // digitized network; arrivalTarget is the route's own last
-  // coordinate (a real network point near the chosen access point),
-  // not the raw access point itself.
   const edgeReal = buildEdgeRealArray(graph, bestRoute, currentMode);
 
   drawRouteSegmented(bestRoute, edgeReal);
@@ -852,11 +882,8 @@ function calculateAndDrawRoute() {
   const minutes = calculateWeightedMinutes(bestRoute, edgeReal, currentMode);
 
   const hasWalkFallback = currentMode === 'drive' && edgeReal.includes(false);
-  const usedAccessPoint = destPoints.length > 0 && destPoints[0] !== destCoord;
 
   console.log(`[Route debug] Mode: ${currentMode}`);
-  console.log(`[Route debug] Destination access points considered: ${destPoints.length}${usedAccessPoint ? ' (using AccessPoints data)' : ' (using centroid/landmark fallback)'}`);
-  console.log(`[Route debug] Chosen destination point: ${bestDestPoint}`);
   console.log(`[Route debug] Total route distance: ${Math.round(totalMeters)}m (start snap: ${Math.round(bestStartSnap)}m, end snap: ${Math.round(bestEndSnap)}m)`);
   console.log(`[Route debug] Includes walk-only fallback stretch: ${hasWalkFallback}`);
 
