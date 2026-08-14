@@ -16,8 +16,9 @@ const MODE_PENALTY_MULTIPLIER = 20;
 
 let currentMode = 'walk';
 let originCoord = null;
-let destCoord = null;
+let destCoord = null;       // fallback point (centroid, or landmark's own point) — used when no access point exists
 let destName = null;
+let destBuildingId = null;  // NEW: OBJECTID of the selected building, used to look up its access points
 
 let arrivalTarget = null;
 
@@ -30,6 +31,9 @@ const SNAP_RADIUS_METERS = 40;
 const SNAP_MAX_CANDIDATES = 10;
 
 let buildingList = [];
+
+// NEW: building_i -> array of [lng, lat] access point coordinates
+let accessPointsByBuilding = {};
 
 let userMarker = null;
 let watchId = null;
@@ -50,7 +54,8 @@ const FOLLOW_RESUME_DELAY_MS = 4000;
 let dataReady = {
   buildings: false,
   network: false,
-  landmarks: false
+  landmarks: false,
+  accessPoints: false
 };
 
 
@@ -154,9 +159,8 @@ map.on('load', () => {
         }
       });
 
-      // CHANGED: clicking a building now ALSO shows a popup with its
-      // name, right where you clicked — this replaces the permanent
-      // always-on labels, so names only appear on demand.
+      // CHANGED: clicking a building now also captures its OBJECTID
+      // (destBuildingId), used to look up its access points.
       map.on('click', 'buildings-3d', (e) => {
         if (!dataReady.buildings || !dataReady.network) return;
 
@@ -172,13 +176,11 @@ map.on('load', () => {
 
         destCoord = turf.centroid(e.features[0]).geometry.coordinates;
         destName = clickedName || null;
+        destBuildingId = props.OBJECTID;
         document.getElementById('dest-input').value = destName || 'Selected on map';
         document.getElementById('suggestions').innerHTML = '';
         if (destName) highlightDestination(destName);
       });
-
-      // REMOVED: building-labels-layer and its source — no more
-      // permanent name labels rendered on load.
 
       buildingList = buildingList.concat(extractNamedLocations(data));
       buildingList.sort((a, b) => a.name.localeCompare(b.name));
@@ -221,9 +223,6 @@ map.on('load', () => {
         }
       });
 
-      // REMOVED: landmarks-label-layer — no more permanent labels here
-      // either. The existing click-to-popup behavior below already
-      // covers "click to see the name," so it's kept as-is.
       map.on('click', 'landmarks-point', (e) => {
         const name = e.features[0].properties.Name || 'Unnamed landmark';
         new mapboxgl.Popup()
@@ -239,6 +238,9 @@ map.on('load', () => {
         map.getCanvas().style.cursor = '';
       });
 
+      // Landmarks have no building link — they route to their own
+      // point directly, same as before. No 'id' field, so the access
+      // point lookup naturally falls through to this fallback.
       const landmarkEntries = data.features
         .filter(f => f.properties.Name)
         .map(f => ({ name: f.properties.Name, coord: f.geometry.coordinates }));
@@ -252,6 +254,36 @@ map.on('load', () => {
     .catch(err => {
       console.error('Failed to load LandMarks.geojson:', err);
       dataReady.landmarks = true;
+      checkAllDataReady();
+    });
+
+  // NEW: fetch AccessPoints.geojson. Only 'building_i' is used to link
+  // to a building's OBJECTID — the 'Name' property here (a shop/tenant
+  // name) is deliberately never compared against building names, which
+  // is what caused the earlier mismatch (e.g. Engineering -> Block B).
+  fetch('data/data/data/AccessPoints.geojson')
+    .then(res => {
+      if (!res.ok) throw new Error(`Server responded with ${res.status}`);
+      return res.json();
+    })
+    .then(data => {
+      data.features.forEach(feature => {
+        const bId = feature.properties.building_i;
+        if (bId === undefined || bId === null) return;
+        if (!accessPointsByBuilding[bId]) accessPointsByBuilding[bId] = [];
+        accessPointsByBuilding[bId].push(feature.geometry.coordinates);
+      });
+
+      console.log('[Access points] Buildings with at least one access point:', Object.keys(accessPointsByBuilding).length);
+
+      dataReady.accessPoints = true;
+      checkAllDataReady();
+    })
+    .catch(err => {
+      console.error('Failed to load AccessPoints.geojson:', err);
+      // Non-fatal — buildings without access point data still work via
+      // centroid fallback, so this doesn't block the app from loading.
+      dataReady.accessPoints = true;
       checkAllDataReady();
     });
 
@@ -296,7 +328,7 @@ window.addEventListener('resize', () => {
 
 
 function checkAllDataReady() {
-  if (dataReady.buildings && dataReady.network && dataReady.landmarks) {
+  if (dataReady.buildings && dataReady.network && dataReady.landmarks && dataReady.accessPoints) {
     document.getElementById('loading-overlay').classList.add('hidden');
     document.getElementById('dest-input').disabled = false;
     document.getElementById('search-btn').disabled = false;
@@ -548,6 +580,8 @@ function checkNavigationProgress(liveCoord) {
 }
 
 
+// CHANGED: now also captures each building's OBJECTID as 'id', so
+// selecting a destination from search can look up its access points.
 function extractNamedLocations(geojson) {
   const results = [];
 
@@ -558,7 +592,7 @@ function extractNamedLocations(geojson) {
     const centroid = turf.centroid(feature);
     const coord = centroid.geometry.coordinates;
 
-    results.push({ name, coord });
+    results.push({ name, coord, id: feature.properties.OBJECTID });
   });
 
   return results;
@@ -574,6 +608,7 @@ destInput.addEventListener('input', () => {
   if (query.length === 0) {
     destCoord = null;
     destName = null;
+    destBuildingId = null;
     clearHighlight();
     return;
   }
@@ -588,6 +623,7 @@ destInput.addEventListener('input', () => {
       destInput.value = match.name;
       destCoord = match.coord;
       destName = match.name;
+      destBuildingId = match.id; // undefined for landmarks — falls back correctly
       suggestionsBox.innerHTML = '';
       highlightDestination(match.name);
     });
@@ -678,6 +714,7 @@ document.getElementById('search-again-btn').addEventListener('click', () => {
   destInput.value = '';
   destCoord = null;
   destName = null;
+  destBuildingId = null;
   clearHighlight();
   clearRoute();
   updateStatus('Search for a destination to begin.');
@@ -747,31 +784,48 @@ function calculateWeightedMinutes(routeCoords, edgeRealArray, mode) {
   return Math.max(1, Math.round(totalSeconds / 60));
 }
 
+// CHANGED: now tries every real access point belonging to the selected
+// building (via destBuildingId -> accessPointsByBuilding), on top of
+// multiple nearby graph-node candidates as before, keeping whichever
+// combination produces the smallest genuine ON-NETWORK trip. Falls
+// back to destCoord (centroid or landmark point) automatically when no
+// access point is recorded for that building.
 function calculateAndDrawRoute() {
   const graph = networkGraph;
 
+  const destPoints = (destBuildingId !== null && destBuildingId !== undefined &&
+                       accessPointsByBuilding[destBuildingId] &&
+                       accessPointsByBuilding[destBuildingId].length > 0)
+    ? accessPointsByBuilding[destBuildingId]
+    : [destCoord];
+
   const startCandidates = findNearestNodes(graph, originCoord);
-  const endCandidates = findNearestNodes(graph, destCoord);
 
   let bestRoute = null;
   let bestTotal = Infinity;
   let bestStartSnap = 0;
   let bestEndSnap = 0;
+  let bestDestPoint = null;
 
-  startCandidates.forEach(startC => {
-    endCandidates.forEach(endC => {
-      const candidateRoute = findShortestPath(graph, startC.node, endC.node, currentMode);
-      if (!candidateRoute) return;
+  destPoints.forEach(destPoint => {
+    const endCandidates = findNearestNodes(graph, destPoint);
 
-      const graphDist = calculateTotalDistance(candidateRoute);
-      const total = startC.dist + graphDist + endC.dist;
+    startCandidates.forEach(startC => {
+      endCandidates.forEach(endC => {
+        const candidateRoute = findShortestPath(graph, startC.node, endC.node, currentMode);
+        if (!candidateRoute) return;
 
-      if (total < bestTotal) {
-        bestTotal = total;
-        bestRoute = candidateRoute;
-        bestStartSnap = startC.dist;
-        bestEndSnap = endC.dist;
-      }
+        const graphDist = calculateTotalDistance(candidateRoute);
+        const total = startC.dist + graphDist + endC.dist;
+
+        if (total < bestTotal) {
+          bestTotal = total;
+          bestRoute = candidateRoute;
+          bestStartSnap = startC.dist;
+          bestEndSnap = endC.dist;
+          bestDestPoint = destPoint;
+        }
+      });
     });
   });
 
@@ -780,6 +834,11 @@ function calculateAndDrawRoute() {
     return;
   }
 
+  // bestRoute is EXACTLY what findShortestPath returned — nothing
+  // appended before or after it. The route can never leave the
+  // digitized network; arrivalTarget is the route's own last
+  // coordinate (a real network point near the chosen access point),
+  // not the raw access point itself.
   const edgeReal = buildEdgeRealArray(graph, bestRoute, currentMode);
 
   drawRouteSegmented(bestRoute, edgeReal);
@@ -793,8 +852,11 @@ function calculateAndDrawRoute() {
   const minutes = calculateWeightedMinutes(bestRoute, edgeReal, currentMode);
 
   const hasWalkFallback = currentMode === 'drive' && edgeReal.includes(false);
+  const usedAccessPoint = destPoints.length > 0 && destPoints[0] !== destCoord;
 
   console.log(`[Route debug] Mode: ${currentMode}`);
+  console.log(`[Route debug] Destination access points considered: ${destPoints.length}${usedAccessPoint ? ' (using AccessPoints data)' : ' (using centroid/landmark fallback)'}`);
+  console.log(`[Route debug] Chosen destination point: ${bestDestPoint}`);
   console.log(`[Route debug] Total route distance: ${Math.round(totalMeters)}m (start snap: ${Math.round(bestStartSnap)}m, end snap: ${Math.round(bestEndSnap)}m)`);
   console.log(`[Route debug] Includes walk-only fallback stretch: ${hasWalkFallback}`);
 
