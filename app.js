@@ -5,20 +5,13 @@ const map = new mapboxgl.Map({
   container: 'map',
   style: 'mapbox://styles/mapbox/standard',
   center: [3.82550, 7.24072], // ⚠️ MANUAL INPUT NEEDED: your real campus coordinates (used only briefly, before the campus-wide view takes over)
-  zoom: 15,
+  zoom: 16,
   pitch: 60,
   bearing: -20
 });
 
-// CHANGED: one combined network graph instead of separate walk/drive
-// graphs. Each edge stores BOTH a 'drivable' and 'walkable' flag, so a
-// single route can correctly switch between the two as needed.
 let networkGraph = {};
 
-// How much more "costly" a non-preferred edge type is treated as during
-// pathfinding — high enough that the algorithm strongly prefers roads
-// while driving, but will still use footpath when it's genuinely the
-// only way through.
 const MODE_PENALTY_MULTIPLIER = 20;
 
 let currentMode = 'walk';
@@ -36,6 +29,8 @@ const NAV_ZOOM = 19;
 const SNAP_RADIUS_METERS = 40;
 const SNAP_MAX_CANDIDATES = 10;
 
+// buildingList now holds BOTH buildings and landmarks — each entry is
+// {name, coord}, so the search box treats them identically.
 let buildingList = [];
 
 let userMarker = null;
@@ -44,8 +39,8 @@ let watchId = null;
 let followMode = false;
 
 let navigationActive = false;
-let currentRoute = [];        // full sequence of coordinates for the current route
-let routeEdgeReal = [];       // NEW: one boolean per edge in currentRoute — true = matches current mode directly (drivable if driving), false = a walk-only fallback stretch
+let currentRoute = [];
+let routeEdgeReal = [];
 let turnPoints = [];
 
 let compassActive = false;
@@ -56,7 +51,8 @@ const FOLLOW_RESUME_DELAY_MS = 4000;
 
 let dataReady = {
   buildings: false,
-  network: false
+  network: false,
+  landmarks: false // NEW: search/labels don't unlock until landmarks load too
 };
 
 
@@ -100,32 +96,11 @@ map.on('load', () => {
     }
   });
 
-  map.addSource('campus-landmarks', {
-    type: 'geojson',
-    data: 'data/data/data/LandMarks.geojson'
-  });
-
-  map.addLayer({
-    id: 'landmarks-point',
-    type: 'circle',
-    source: 'campus-landmarks',
-    paint: {
-      'circle-radius': 6,
-      'circle-color': '#9b59b6',
-      'circle-stroke-width': 2,
-      'circle-stroke-color': '#ffffff'
-    }
-  });
-
   map.addSource('route-line-source', {
     type: 'geojson',
     data: { type: 'FeatureCollection', features: [] }
   });
 
-  // CHANGED: TWO layers sharing one source, split by the 'drivable'
-  // property on each feature — Mapbox's line-dasharray doesn't support
-  // per-feature (data-driven) values, so two filtered layers is the
-  // correct way to show solid vs dashed portions of the same line.
   map.addLayer({
     id: 'route-line-solid',
     type: 'line',
@@ -149,21 +124,6 @@ map.on('load', () => {
       'line-opacity': 0.95,
       'line-dasharray': [2, 2]
     }
-  });
-
-  map.on('click', 'landmarks-point', (e) => {
-    const name = e.features[0].properties.Name || 'Unnamed landmark';
-    new mapboxgl.Popup()
-      .setLngLat(e.lngLat)
-      .setHTML(`<strong>${name}</strong>`)
-      .addTo(map);
-  });
-
-  map.on('mouseenter', 'landmarks-point', () => {
-    map.getCanvas().style.cursor = 'pointer';
-  });
-  map.on('mouseleave', 'landmarks-point', () => {
-    map.getCanvas().style.cursor = '';
   });
 
   fetch('data/data/data/Buildings.geojson')
@@ -205,7 +165,46 @@ map.on('load', () => {
         if (destName) highlightDestination(destName);
       });
 
-      buildingList = extractNamedLocations(data);
+      // NEW: a point at each building's centroid, carrying its Name,
+      // purely for the label layer below (buildings-3d itself can't
+      // show text since it's an extrusion layer, not a symbol layer).
+      const buildingLabelFeatures = data.features
+        .filter(f => f.properties.Name)
+        .map(f => ({
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: turf.centroid(f).geometry.coordinates },
+          properties: { Name: f.properties.Name }
+        }));
+
+      map.addSource('building-labels', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: buildingLabelFeatures }
+      });
+
+      // NEW: permanent building name labels, shown from page load.
+      // text-allow-overlap/text-ignore-placement are both true so every
+      // single label is forced to render, per the requirement that all
+      // names show up — Mapbox's default behavior would otherwise hide
+      // labels that crowd too closely together.
+      map.addLayer({
+        id: 'building-labels-layer',
+        type: 'symbol',
+        source: 'building-labels',
+        layout: {
+          'text-field': ['get', 'Name'],
+          'text-size': 11,
+          'text-anchor': 'center',
+          'text-allow-overlap': true,
+          'text-ignore-placement': true
+        },
+        paint: {
+          'text-color': '#1a1a1a',
+          'text-halo-color': '#ffffff',
+          'text-halo-width': 1.5
+        }
+      });
+
+      buildingList = buildingList.concat(extractNamedLocations(data));
       buildingList.sort((a, b) => a.name.localeCompare(b.name));
 
       const campusBbox = turf.bbox(data);
@@ -217,6 +216,92 @@ map.on('load', () => {
     .catch(err => {
       console.error('Failed to load Buildings.geojson:', err);
       showLoadError('Could not load building data. Please refresh, or check your connection.');
+    });
+
+  // NEW: LandMarks now fetched as raw data (not just added as a plain
+  // map source), so its points can ALSO be added to buildingList for
+  // search, and given the same permanent-label treatment as buildings.
+  fetch('data/data/data/LandMarks.geojson')
+    .then(res => {
+      if (!res.ok) throw new Error(`Server responded with ${res.status}`);
+      return res.json();
+    })
+    .then(data => {
+      data.features.forEach(feature => {
+        feature.properties.Name = normalizeName(feature.properties.Name);
+      });
+
+      map.addSource('campus-landmarks', {
+        type: 'geojson',
+        data: data
+      });
+
+      map.addLayer({
+        id: 'landmarks-point',
+        type: 'circle',
+        source: 'campus-landmarks',
+        paint: {
+          'circle-radius': 6,
+          'circle-color': '#9b59b6',
+          'circle-stroke-width': 2,
+          'circle-stroke-color': '#ffffff'
+        }
+      });
+
+      // NEW: permanent landmark labels, offset slightly above each dot
+      // so the text doesn't sit directly on top of the marker.
+      map.addLayer({
+        id: 'landmarks-label-layer',
+        type: 'symbol',
+        source: 'campus-landmarks',
+        layout: {
+          'text-field': ['get', 'Name'],
+          'text-size': 11,
+          'text-anchor': 'top',
+          'text-offset': [0, 0.8],
+          'text-allow-overlap': true,
+          'text-ignore-placement': true
+        },
+        paint: {
+          'text-color': '#1a1a1a',
+          'text-halo-color': '#ffffff',
+          'text-halo-width': 1.5
+        }
+      });
+
+      map.on('click', 'landmarks-point', (e) => {
+        const name = e.features[0].properties.Name || 'Unnamed landmark';
+        new mapboxgl.Popup()
+          .setLngLat(e.lngLat)
+          .setHTML(`<strong>${name}</strong>`)
+          .addTo(map);
+      });
+
+      map.on('mouseenter', 'landmarks-point', () => {
+        map.getCanvas().style.cursor = 'pointer';
+      });
+      map.on('mouseleave', 'landmarks-point', () => {
+        map.getCanvas().style.cursor = '';
+      });
+
+      // NEW: landmarks added into the same searchable list as buildings
+      // — coordinates come straight from each Point feature, no
+      // centroid calculation needed since they're already single points.
+      const landmarkEntries = data.features
+        .filter(f => f.properties.Name)
+        .map(f => ({ name: f.properties.Name, coord: f.geometry.coordinates }));
+
+      buildingList = buildingList.concat(landmarkEntries);
+      buildingList.sort((a, b) => a.name.localeCompare(b.name));
+
+      dataReady.landmarks = true;
+      checkAllDataReady();
+    })
+    .catch(err => {
+      console.error('Failed to load LandMarks.geojson:', err);
+      // Non-fatal — the app still works fully via buildings alone.
+      dataReady.landmarks = true;
+      checkAllDataReady();
     });
 
   fetch('data/data/data/CampusNetwork.geojson')
@@ -260,7 +345,7 @@ window.addEventListener('resize', () => {
 
 
 function checkAllDataReady() {
-  if (dataReady.buildings && dataReady.network) {
+  if (dataReady.buildings && dataReady.network && dataReady.landmarks) {
     document.getElementById('loading-overlay').classList.add('hidden');
     document.getElementById('dest-input').disabled = false;
     document.getElementById('search-btn').disabled = false;
@@ -347,11 +432,6 @@ function startLiveLocation() {
 }
 
 
-// NEW: draws the route as multiple colored/dashed segments instead of
-// one uniform line. Groups consecutive edges that share the same
-// "real" flag (matches current mode directly) into single features,
-// tagging each with properties.drivable so the two map layers (solid
-// blue / dashed orange) can filter correctly.
 function drawRouteSegmented(coordsArray, edgeRealArray) {
   const features = [];
   let groupCoords = [coordsArray[0]];
@@ -384,10 +464,6 @@ function drawRouteSegmented(coordsArray, edgeRealArray) {
 }
 
 
-// CHANGED: recomputes both the visible receding line AND its color
-// segmentation on every GPS update, using the nearest-point INDEX
-// along the route (not a continuous slice) so it stays aligned with
-// the precomputed per-edge "real" flags.
 function updateRouteLineProgress(liveCoord) {
   if (currentRoute.length < 2) return;
 
@@ -562,7 +638,7 @@ destInput.addEventListener('input', () => {
       destCoord = match.coord;
       destName = match.name;
       suggestionsBox.innerHTML = '';
-      highlightDestination(match.name);
+      highlightDestination(match.name); // has no visible effect for landmarks (no matching building layer feature) — harmless
     });
     suggestionsBox.appendChild(item);
   });
@@ -686,10 +762,6 @@ function findNearestNodes(graph, coord) {
   return allCandidates.slice(0, SNAP_MAX_CANDIDATES);
 }
 
-// NEW: looks up whether the edge actually traversed between two
-// consecutive route coordinates matches the current mode directly
-// (drivable, if driving) — used to build the per-edge "real" flag
-// array that drives the two-tone rendering and mixed-speed ETA.
 function edgeMatchesMode(graph, coordA, coordB, mode) {
   const keyA = coordA.map(n => n.toFixed(6)).join(',');
   const neighbors = graph[keyA] || [];
@@ -697,7 +769,7 @@ function edgeMatchesMode(graph, coordA, coordB, mode) {
     n.node[0].toFixed(6) === coordB[0].toFixed(6) &&
     n.node[1].toFixed(6) === coordB[1].toFixed(6)
   );
-  if (!match) return true; // shouldn't happen, but default to "real" if somehow not found
+  if (!match) return true;
   return mode === 'drive' ? match.drivable : match.walkable;
 }
 
@@ -709,10 +781,6 @@ function buildEdgeRealArray(graph, route, mode) {
   return arr;
 }
 
-// NEW: computes travel time using the CORRECT speed for each edge —
-// driving speed where the edge is actually drivable, walking speed
-// where the route has to drop onto footpath-only ground (in drive
-// mode); always walking speed in walk mode.
 function calculateWeightedMinutes(routeCoords, edgeRealArray, mode) {
   let totalSeconds = 0;
   for (let i = 0; i < routeCoords.length - 1; i++) {
@@ -785,17 +853,11 @@ function calculateAndDrawRoute() {
   document.getElementById('start-nav-btn').disabled = false;
   document.getElementById('recenter-btn').disabled = false;
 
-  // NEW: lets the user know, in plain text too, why part of the line
-  // might be dashed/orange — not just relying on the visual alone.
   if (hasWalkFallback) {
     updateStatus('Route ready. Part of this trip must be walked (shown in orange).');
   } else {
     updateStatus('Route ready. Tap Start Navigation when you\'re ready to go.');
   }
-}
-
-function drawRoute(routeCoords) {
-  drawRouteSegmented(routeCoords, routeCoords.map(() => true));
 }
 
 function calculateTotalDistance(routeCoords) {
@@ -806,9 +868,6 @@ function calculateTotalDistance(routeCoords) {
   return total;
 }
 
-
-// ── NETWORK BUILDING: combined graph, intersection repair, mode-aware
-// edges (drivable + walkable flags kept together) ───────────────────
 
 function extractAllSegments(geojson) {
   const segments = [];
@@ -845,11 +904,6 @@ function pointsClose(a, b, epsilon = 1e-7) {
   return Math.abs(a[0] - b[0]) < epsilon && Math.abs(a[1] - b[1]) < epsilon;
 }
 
-// CHANGED: now works on the combined segment list (roads + footpaths
-// together), so a footpath crossing a road — not just road-crossing-road
-// — gets a real shared node inserted at that crossing too. This is what
-// makes a clean transition from "drivable" to "walk-only" possible at
-// an actual physical point on the ground.
 function splitSegmentsAtIntersections(segments) {
   const splitPoints = segments.map(() => []);
   const bboxes = segments.map(segmentBBox);
@@ -910,8 +964,6 @@ function splitSegmentsAtIntersections(segments) {
   return finalSegments;
 }
 
-// CHANGED: builds ONE graph from ALL segments together (not filtered
-// by mode), each edge carrying both its drivable and walkable flags.
 function buildCombinedGraph(geojson) {
   const rawSegments = extractAllSegments(geojson);
   const repairedSegments = splitSegmentsAtIntersections(rawSegments);
@@ -959,11 +1011,6 @@ function countIslands(graph) {
   return islands;
 }
 
-// CHANGED: takes a 'mode' parameter and applies MODE_PENALTY_MULTIPLIER
-// to edges that don't match the requested mode directly — this is what
-// lets driving routes use footpath-only stretches ONLY when genuinely
-// necessary (heavily discouraged, never forbidden), instead of hitting
-// a dead end.
 function findShortestPath(graph, startCoord, endCoord, mode) {
   const start = startCoord.map(n => n.toFixed(6)).join(',');
   const end = endCoord.map(n => n.toFixed(6)).join(',');
