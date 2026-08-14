@@ -56,27 +56,12 @@ let dataReady = {
   accessPoints: false
 };
 
-// NEW: animated "flow" dash pattern for the route line, cycling
-// through a sequence so the line appears to move toward the
-// destination — purely visual, no effect on the actual route data.
 const DASH_ANIMATION_SEQUENCE = [
-  [0, 4, 3],
-  [0.5, 4, 2.5],
-  [1, 4, 2],
-  [1.5, 4, 1.5],
-  [2, 4, 1],
-  [2.5, 4, 0.5],
-  [3, 4, 0],
-  [0, 0.3, 3, 3.7],
-  [0, 0.6, 3, 3.4],
-  [0, 0.9, 3, 3.1],
-  [0, 1.2, 3, 2.8],
-  [0, 1.5, 3, 2.5],
-  [0, 1.8, 3, 2.2],
-  [0, 2.1, 3, 1.9],
-  [0, 2.4, 3, 1.6],
-  [0, 2.7, 3, 1.3],
-  [0, 3, 3, 1]
+  [0, 4, 3], [0.5, 4, 2.5], [1, 4, 2], [1.5, 4, 1.5], [2, 4, 1],
+  [2.5, 4, 0.5], [3, 4, 0],
+  [0, 0.3, 3, 3.7], [0, 0.6, 3, 3.4], [0, 0.9, 3, 3.1], [0, 1.2, 3, 2.8],
+  [0, 1.5, 3, 2.5], [0, 1.8, 3, 2.2], [0, 2.1, 3, 1.9], [0, 2.4, 3, 1.6],
+  [0, 2.7, 3, 1.3], [0, 3, 3, 1]
 ];
 let dashStep = 0;
 
@@ -86,9 +71,6 @@ function normalizeName(name) {
   return name.trim().replace(/\s+/g, ' ');
 }
 
-// NEW: picks a Mapbox Standard-style light preset based on the real
-// local time, and applies it once on load — buildings render with
-// dawn/day/dusk/night lighting to match the actual time of day.
 function applyTimeOfDayLighting() {
   const hour = new Date().getHours();
   let preset;
@@ -101,8 +83,6 @@ function applyTimeOfDayLighting() {
   console.log(`[Lighting] Applied "${preset}" light preset based on local time (${hour}:00).`);
 }
 
-// NEW: advances the dash pattern on a timer, applied to both route
-// line layers — this is what creates the flowing/moving line effect.
 function startRouteAnimation() {
   setInterval(() => {
     dashStep = (dashStep + 1) % DASH_ANIMATION_SEQUENCE.length;
@@ -120,7 +100,7 @@ function startRouteAnimation() {
 map.on('load', () => {
 
   map.setConfigProperty('basemap', 'show3dObjects', false);
-  applyTimeOfDayLighting(); // NEW
+  applyTimeOfDayLighting();
 
   map.addSource('campus-paths', {
     type: 'geojson',
@@ -181,7 +161,7 @@ map.on('load', () => {
     }
   });
 
-  startRouteAnimation(); // NEW
+  startRouteAnimation();
 
   fetch('data/data/data/Buildings.geojson')
     .then(res => {
@@ -336,11 +316,17 @@ map.on('load', () => {
       return res.json();
     })
     .then(data => {
-      console.log('[Graph build] Combining network and splitting at real intersections — this may take a moment...');
+      console.log('[Graph build] Combining network, splitting intersections, and clustering near-miss endpoints — this may take a moment...');
       networkGraph = buildCombinedGraph(data);
 
+      const islandCount = countIslands(networkGraph);
       console.log('Network graph nodes:', Object.keys(networkGraph).length);
-      console.log('Network graph islands (should be 1):', countIslands(networkGraph));
+      console.log('Network graph islands (should be 1):', islandCount);
+
+      if (islandCount > 1) {
+        console.warn('[Diagnostic] Network still has disconnected islands after clustering — listing them below (size + approximate center):');
+        logIslandDetails(networkGraph);
+      }
 
       dataReady.network = true;
       checkAllDataReady();
@@ -909,6 +895,8 @@ function calculateTotalDistance(routeCoords) {
 }
 
 
+// ── NETWORK BUILDING: intersection repair + NEW endpoint clustering ──
+
 function extractAllSegments(geojson) {
   const segments = [];
   geojson.features.forEach(feature => {
@@ -1004,9 +992,35 @@ function splitSegmentsAtIntersections(segments) {
   return finalSegments;
 }
 
+// NEW: endpoint clustering — merges endpoints that are CLOSE (within
+// roughly 1 meter) but not exactly identical, using a coarse rounding
+// grid. This is what fixes near-miss digitizing gaps that exact
+// coordinate matching (and even intersection detection, which only
+// catches genuine crossings, not two lines that were meant to touch
+// end-to-end but are slightly offset) can't catch on their own.
+function clusterEndpoints(segments, precisionDecimals = 5) {
+  const clusterMap = {};
+
+  function clusterCoord(coord) {
+    const key = coord.map(n => n.toFixed(precisionDecimals)).join(',');
+    if (!clusterMap[key]) {
+      clusterMap[key] = coord; // first point seen in this ~1m cell becomes the canonical point
+    }
+    return clusterMap[key];
+  }
+
+  return segments.map(seg => ({
+    p1: clusterCoord(seg.p1),
+    p2: clusterCoord(seg.p2),
+    walkable: seg.walkable,
+    drivable: seg.drivable
+  }));
+}
+
 function buildCombinedGraph(geojson) {
   const rawSegments = extractAllSegments(geojson);
-  const repairedSegments = splitSegmentsAtIntersections(rawSegments);
+  const splitSegments = splitSegmentsAtIntersections(rawSegments);
+  const clusteredSegments = clusterEndpoints(splitSegments); // NEW step
 
   const graph = {};
 
@@ -1014,7 +1028,9 @@ function buildCombinedGraph(geojson) {
     return coord.map(n => n.toFixed(6)).join(',');
   }
 
-  repairedSegments.forEach(({ p1, p2, walkable, drivable }) => {
+  clusteredSegments.forEach(({ p1, p2, walkable, drivable }) => {
+    if (pointsClose(p1, p2)) return; // clustering collapsed this to a zero-length edge — skip it
+
     const nodeA = snap(p1);
     const nodeB = snap(p2);
     const dist = turf.distance(p1, p2, { units: 'meters' });
@@ -1049,6 +1065,34 @@ function countIslands(graph) {
   });
 
   return islands;
+}
+
+// NEW: diagnostic-only — if islands remain after clustering, this
+// prints each island's size and approximate real-world center, so you
+// can jump straight to that spot in QGIS instead of hunting blindly.
+function logIslandDetails(graph) {
+  const visited = new Set();
+
+  Object.keys(graph).forEach(startNode => {
+    if (visited.has(startNode)) return;
+    const clusterNodes = [];
+    const stack = [startNode];
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (visited.has(current)) continue;
+      visited.add(current);
+      clusterNodes.push(current);
+      graph[current].forEach(neighbor => {
+        const neighborKey = neighbor.node.map(n => n.toFixed(6)).join(',');
+        if (!visited.has(neighborKey)) stack.push(neighborKey);
+      });
+    }
+
+    const coords = clusterNodes.map(n => n.split(',').map(Number));
+    const avgLng = coords.reduce((s, c) => s + c[0], 0) / coords.length;
+    const avgLat = coords.reduce((s, c) => s + c[1], 0) / coords.length;
+    console.log(`  Island: ${clusterNodes.length} nodes, approx. center [${avgLng.toFixed(6)}, ${avgLat.toFixed(6)}]`);
+  });
 }
 
 function findShortestPath(graph, startCoord, endCoord, mode) {
