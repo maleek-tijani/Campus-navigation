@@ -29,8 +29,6 @@ const NAV_ZOOM = 19;
 const SNAP_RADIUS_METERS = 40;
 const SNAP_MAX_CANDIDATES = 10;
 
-// buildingList now holds BOTH buildings and landmarks — each entry is
-// {name, coord}, so the search box treats them identically.
 let buildingList = [];
 
 let userMarker = null;
@@ -52,7 +50,7 @@ const FOLLOW_RESUME_DELAY_MS = 4000;
 let dataReady = {
   buildings: false,
   network: false,
-  landmarks: false // NEW: search/labels don't unlock until landmarks load too
+  landmarks: false
 };
 
 
@@ -156,53 +154,31 @@ map.on('load', () => {
         }
       });
 
+      // CHANGED: clicking a building now ALSO shows a popup with its
+      // name, right where you clicked — this replaces the permanent
+      // always-on labels, so names only appear on demand.
       map.on('click', 'buildings-3d', (e) => {
         if (!dataReady.buildings || !dataReady.network) return;
+
+        const props = e.features[0].properties;
+        const clickedName = normalizeName(props.Name);
+
+        if (clickedName) {
+          new mapboxgl.Popup()
+            .setLngLat(e.lngLat)
+            .setHTML(`<strong>${clickedName}</strong>`)
+            .addTo(map);
+        }
+
         destCoord = turf.centroid(e.features[0]).geometry.coordinates;
-        destName = normalizeName(e.features[0].properties.Name) || null;
+        destName = clickedName || null;
         document.getElementById('dest-input').value = destName || 'Selected on map';
         document.getElementById('suggestions').innerHTML = '';
         if (destName) highlightDestination(destName);
       });
 
-      // NEW: a point at each building's centroid, carrying its Name,
-      // purely for the label layer below (buildings-3d itself can't
-      // show text since it's an extrusion layer, not a symbol layer).
-      const buildingLabelFeatures = data.features
-        .filter(f => f.properties.Name)
-        .map(f => ({
-          type: 'Feature',
-          geometry: { type: 'Point', coordinates: turf.centroid(f).geometry.coordinates },
-          properties: { Name: f.properties.Name }
-        }));
-
-      map.addSource('building-labels', {
-        type: 'geojson',
-        data: { type: 'FeatureCollection', features: buildingLabelFeatures }
-      });
-
-      // NEW: permanent building name labels, shown from page load.
-      // text-allow-overlap/text-ignore-placement are both true so every
-      // single label is forced to render, per the requirement that all
-      // names show up — Mapbox's default behavior would otherwise hide
-      // labels that crowd too closely together.
-      map.addLayer({
-        id: 'building-labels-layer',
-        type: 'symbol',
-        source: 'building-labels',
-        layout: {
-          'text-field': ['get', 'Name'],
-          'text-size': 11,
-          'text-anchor': 'center',
-          'text-allow-overlap': true,
-          'text-ignore-placement': true
-        },
-        paint: {
-          'text-color': '#1a1a1a',
-          'text-halo-color': '#ffffff',
-          'text-halo-width': 1.5
-        }
-      });
+      // REMOVED: building-labels-layer and its source — no more
+      // permanent name labels rendered on load.
 
       buildingList = buildingList.concat(extractNamedLocations(data));
       buildingList.sort((a, b) => a.name.localeCompare(b.name));
@@ -218,9 +194,6 @@ map.on('load', () => {
       showLoadError('Could not load building data. Please refresh, or check your connection.');
     });
 
-  // NEW: LandMarks now fetched as raw data (not just added as a plain
-  // map source), so its points can ALSO be added to buildingList for
-  // search, and given the same permanent-label treatment as buildings.
   fetch('data/data/data/LandMarks.geojson')
     .then(res => {
       if (!res.ok) throw new Error(`Server responded with ${res.status}`);
@@ -248,27 +221,9 @@ map.on('load', () => {
         }
       });
 
-      // NEW: permanent landmark labels, offset slightly above each dot
-      // so the text doesn't sit directly on top of the marker.
-      map.addLayer({
-        id: 'landmarks-label-layer',
-        type: 'symbol',
-        source: 'campus-landmarks',
-        layout: {
-          'text-field': ['get', 'Name'],
-          'text-size': 11,
-          'text-anchor': 'top',
-          'text-offset': [0, 0.8],
-          'text-allow-overlap': true,
-          'text-ignore-placement': true
-        },
-        paint: {
-          'text-color': '#1a1a1a',
-          'text-halo-color': '#ffffff',
-          'text-halo-width': 1.5
-        }
-      });
-
+      // REMOVED: landmarks-label-layer — no more permanent labels here
+      // either. The existing click-to-popup behavior below already
+      // covers "click to see the name," so it's kept as-is.
       map.on('click', 'landmarks-point', (e) => {
         const name = e.features[0].properties.Name || 'Unnamed landmark';
         new mapboxgl.Popup()
@@ -284,9 +239,6 @@ map.on('load', () => {
         map.getCanvas().style.cursor = '';
       });
 
-      // NEW: landmarks added into the same searchable list as buildings
-      // — coordinates come straight from each Point feature, no
-      // centroid calculation needed since they're already single points.
       const landmarkEntries = data.features
         .filter(f => f.properties.Name)
         .map(f => ({ name: f.properties.Name, coord: f.geometry.coordinates }));
@@ -299,7 +251,6 @@ map.on('load', () => {
     })
     .catch(err => {
       console.error('Failed to load LandMarks.geojson:', err);
-      // Non-fatal — the app still works fully via buildings alone.
       dataReady.landmarks = true;
       checkAllDataReady();
     });
@@ -638,7 +589,7 @@ destInput.addEventListener('input', () => {
       destCoord = match.coord;
       destName = match.name;
       suggestionsBox.innerHTML = '';
-      highlightDestination(match.name); // has no visible effect for landmarks (no matching building layer feature) — harmless
+      highlightDestination(match.name);
     });
     suggestionsBox.appendChild(item);
   });
