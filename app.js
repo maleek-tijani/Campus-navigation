@@ -14,6 +14,11 @@ let networkGraph = {};
 
 const MODE_PENALTY_MULTIPLIER = 20;
 
+// NEW: how close (in real meters) two endpoints must be to be treated
+// as the same physical point. Bumped up from the previous grid-based
+// ~1m to a proper 2m radius, using real distance rather than a grid.
+const CLUSTER_THRESHOLD_METERS = 2;
+
 let currentMode = 'walk';
 let originCoord = null;
 let destCoord = null;
@@ -316,7 +321,7 @@ map.on('load', () => {
       return res.json();
     })
     .then(data => {
-      console.log('[Graph build] Combining network, splitting intersections, and clustering near-miss endpoints — this may take a moment...');
+      console.log('[Graph build] Combining network, splitting intersections, and clustering nearby endpoints — this may take a moment...');
       networkGraph = buildCombinedGraph(data);
 
       const islandCount = countIslands(networkGraph);
@@ -895,8 +900,6 @@ function calculateTotalDistance(routeCoords) {
 }
 
 
-// ── NETWORK BUILDING: intersection repair + NEW endpoint clustering ──
-
 function extractAllSegments(geojson) {
   const segments = [];
   geojson.features.forEach(feature => {
@@ -992,26 +995,70 @@ function splitSegmentsAtIntersections(segments) {
   return finalSegments;
 }
 
-// NEW: endpoint clustering — merges endpoints that are CLOSE (within
-// roughly 1 meter) but not exactly identical, using a coarse rounding
-// grid. This is what fixes near-miss digitizing gaps that exact
-// coordinate matching (and even intersection detection, which only
-// catches genuine crossings, not two lines that were meant to touch
-// end-to-end but are slightly offset) can't catch on their own.
-function clusterEndpoints(segments, precisionDecimals = 5) {
-  const clusterMap = {};
+// CHANGED: proper distance-based clustering (union-find), replacing
+// the previous grid-rounding approach. Every unique endpoint is
+// compared against every other by real geographic distance; any two
+// within CLUSTER_THRESHOLD_METERS are merged into one shared canonical
+// point (the average position of everything in that cluster). This
+// correctly catches near-miss gaps regardless of where they happen to
+// fall relative to a rounding grid.
+function clusterEndpointsByDistance(segments, thresholdMeters) {
+  const uniqueMap = new Map();
+  segments.forEach(seg => {
+    [seg.p1, seg.p2].forEach(p => {
+      const key = p.map(n => n.toFixed(7)).join(',');
+      if (!uniqueMap.has(key)) uniqueMap.set(key, p);
+    });
+  });
+  const uniquePoints = Array.from(uniqueMap.values());
+  const keys = Array.from(uniqueMap.keys());
 
-  function clusterCoord(coord) {
-    const key = coord.map(n => n.toFixed(precisionDecimals)).join(',');
-    if (!clusterMap[key]) {
-      clusterMap[key] = coord; // first point seen in this ~1m cell becomes the canonical point
+  const parent = uniquePoints.map((_, i) => i);
+  function find(i) {
+    while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; }
+    return i;
+  }
+  function union(i, j) {
+    const ri = find(i), rj = find(j);
+    if (ri !== rj) parent[ri] = rj;
+  }
+
+  for (let i = 0; i < uniquePoints.length; i++) {
+    for (let j = i + 1; j < uniquePoints.length; j++) {
+      if (turf.distance(uniquePoints[i], uniquePoints[j], { units: 'meters' }) <= thresholdMeters) {
+        union(i, j);
+      }
     }
-    return clusterMap[key];
+  }
+
+  const groups = {};
+  uniquePoints.forEach((p, i) => {
+    const root = find(i);
+    if (!groups[root]) groups[root] = [];
+    groups[root].push(p);
+  });
+
+  const canonicalByRoot = {};
+  Object.keys(groups).forEach(root => {
+    const pts = groups[root];
+    const avgLng = pts.reduce((s, p) => s + p[0], 0) / pts.length;
+    const avgLat = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+    canonicalByRoot[root] = [avgLng, avgLat];
+  });
+
+  const lookup = new Map();
+  uniquePoints.forEach((p, i) => {
+    lookup.set(keys[i], canonicalByRoot[find(i)]);
+  });
+
+  function mapPoint(p) {
+    const key = p.map(n => n.toFixed(7)).join(',');
+    return lookup.get(key) || p;
   }
 
   return segments.map(seg => ({
-    p1: clusterCoord(seg.p1),
-    p2: clusterCoord(seg.p2),
+    p1: mapPoint(seg.p1),
+    p2: mapPoint(seg.p2),
     walkable: seg.walkable,
     drivable: seg.drivable
   }));
@@ -1020,7 +1067,7 @@ function clusterEndpoints(segments, precisionDecimals = 5) {
 function buildCombinedGraph(geojson) {
   const rawSegments = extractAllSegments(geojson);
   const splitSegments = splitSegmentsAtIntersections(rawSegments);
-  const clusteredSegments = clusterEndpoints(splitSegments); // NEW step
+  const clusteredSegments = clusterEndpointsByDistance(splitSegments, CLUSTER_THRESHOLD_METERS);
 
   const graph = {};
 
@@ -1029,7 +1076,7 @@ function buildCombinedGraph(geojson) {
   }
 
   clusteredSegments.forEach(({ p1, p2, walkable, drivable }) => {
-    if (pointsClose(p1, p2)) return; // clustering collapsed this to a zero-length edge — skip it
+    if (pointsClose(p1, p2)) return;
 
     const nodeA = snap(p1);
     const nodeB = snap(p2);
@@ -1067,9 +1114,6 @@ function countIslands(graph) {
   return islands;
 }
 
-// NEW: diagnostic-only — if islands remain after clustering, this
-// prints each island's size and approximate real-world center, so you
-// can jump straight to that spot in QGIS instead of hunting blindly.
 function logIslandDetails(graph) {
   const visited = new Set();
 
