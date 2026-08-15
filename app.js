@@ -13,20 +13,11 @@ const map = new mapboxgl.Map({
 let networkGraph = {};
 
 const MODE_PENALTY_MULTIPLIER = 20;
-const CLUSTER_THRESHOLD_METERS = 2;
-
-// NEW: last-resort bridge distance — if a disconnected island can't
-// reach the main network within this many meters, it's bridged with a
-// synthetic connector (rendered dashed/orange, and logged loudly).
-// Kept deliberately short so this can't silently paper over a
-// genuinely large, meaningful gap.
-const MAX_BRIDGE_METERS = 25;
 
 let currentMode = 'walk';
 let originCoord = null;
 let destCoord = null;
 let destName = null;
-let destBuildingId = null;
 
 let arrivalTarget = null;
 
@@ -39,7 +30,6 @@ const SNAP_RADIUS_METERS = 40;
 const SNAP_MAX_CANDIDATES = 10;
 
 let buildingList = [];
-let accessPointsByBuilding = {};
 
 let userMarker = null;
 let watchId = null;
@@ -60,18 +50,8 @@ const FOLLOW_RESUME_DELAY_MS = 4000;
 let dataReady = {
   buildings: false,
   network: false,
-  landmarks: false,
-  accessPoints: false
+  landmarks: false
 };
-
-const DASH_ANIMATION_SEQUENCE = [
-  [0, 4, 3], [0.5, 4, 2.5], [1, 4, 2], [1.5, 4, 1.5], [2, 4, 1],
-  [2.5, 4, 0.5], [3, 4, 0],
-  [0, 0.3, 3, 3.7], [0, 0.6, 3, 3.4], [0, 0.9, 3, 3.1], [0, 1.2, 3, 2.8],
-  [0, 1.5, 3, 2.5], [0, 1.8, 3, 2.2], [0, 2.1, 3, 1.9], [0, 2.4, 3, 1.6],
-  [0, 2.7, 3, 1.3], [0, 3, 3, 1]
-];
-let dashStep = 0;
 
 
 function normalizeName(name) {
@@ -79,36 +59,10 @@ function normalizeName(name) {
   return name.trim().replace(/\s+/g, ' ');
 }
 
-function applyTimeOfDayLighting() {
-  const hour = new Date().getHours();
-  let preset;
-  if (hour >= 5 && hour < 8) preset = 'dawn';
-  else if (hour >= 8 && hour < 18) preset = 'day';
-  else if (hour >= 18 && hour < 20) preset = 'dusk';
-  else preset = 'night';
-
-  map.setConfigProperty('basemap', 'lightPreset', preset);
-  console.log(`[Lighting] Applied "${preset}" light preset based on local time (${hour}:00).`);
-}
-
-function startRouteAnimation() {
-  setInterval(() => {
-    dashStep = (dashStep + 1) % DASH_ANIMATION_SEQUENCE.length;
-    const pattern = DASH_ANIMATION_SEQUENCE[dashStep];
-    if (map.getLayer('route-line-solid')) {
-      map.setPaintProperty('route-line-solid', 'line-dasharray', pattern);
-    }
-    if (map.getLayer('route-line-dashed')) {
-      map.setPaintProperty('route-line-dashed', 'line-dasharray', pattern);
-    }
-  }, 60);
-}
-
 
 map.on('load', () => {
 
   map.setConfigProperty('basemap', 'show3dObjects', false);
-  applyTimeOfDayLighting();
 
   map.addSource('campus-paths', {
     type: 'geojson',
@@ -165,11 +119,10 @@ map.on('load', () => {
     paint: {
       'line-color': '#f57c00',
       'line-width': 6,
-      'line-opacity': 0.95
+      'line-opacity': 0.95,
+      'line-dasharray': [2, 2]
     }
   });
-
-  startRouteAnimation();
 
   fetch('data/data/data/Buildings.geojson')
     .then(res => {
@@ -201,6 +154,9 @@ map.on('load', () => {
         }
       });
 
+      // CHANGED: clicking a building now ALSO shows a popup with its
+      // name, right where you clicked — this replaces the permanent
+      // always-on labels, so names only appear on demand.
       map.on('click', 'buildings-3d', (e) => {
         if (!dataReady.buildings || !dataReady.network) return;
 
@@ -216,11 +172,13 @@ map.on('load', () => {
 
         destCoord = turf.centroid(e.features[0]).geometry.coordinates;
         destName = clickedName || null;
-        destBuildingId = props.OBJECTID;
         document.getElementById('dest-input').value = destName || 'Selected on map';
         document.getElementById('suggestions').innerHTML = '';
         if (destName) highlightDestination(destName);
       });
+
+      // REMOVED: building-labels-layer and its source — no more
+      // permanent name labels rendered on load.
 
       buildingList = buildingList.concat(extractNamedLocations(data));
       buildingList.sort((a, b) => a.name.localeCompare(b.name));
@@ -263,6 +221,9 @@ map.on('load', () => {
         }
       });
 
+      // REMOVED: landmarks-label-layer — no more permanent labels here
+      // either. The existing click-to-popup behavior below already
+      // covers "click to see the name," so it's kept as-is.
       map.on('click', 'landmarks-point', (e) => {
         const name = e.features[0].properties.Name || 'Unnamed landmark';
         new mapboxgl.Popup()
@@ -294,47 +255,17 @@ map.on('load', () => {
       checkAllDataReady();
     });
 
-  fetch('data/data/data/AccessPoints.geojson')
-    .then(res => {
-      if (!res.ok) throw new Error(`Server responded with ${res.status}`);
-      return res.json();
-    })
-    .then(data => {
-      data.features.forEach(feature => {
-        const bId = feature.properties.building_i;
-        if (bId === undefined || bId === null) return;
-        if (!accessPointsByBuilding[bId]) accessPointsByBuilding[bId] = [];
-        accessPointsByBuilding[bId].push(feature.geometry.coordinates);
-      });
-
-      console.log('[Access points] Buildings with at least one access point:', Object.keys(accessPointsByBuilding).length);
-
-      dataReady.accessPoints = true;
-      checkAllDataReady();
-    })
-    .catch(err => {
-      console.error('Failed to load AccessPoints.geojson:', err);
-      dataReady.accessPoints = true;
-      checkAllDataReady();
-    });
-
   fetch('data/data/data/CampusNetwork.geojson')
     .then(res => {
       if (!res.ok) throw new Error(`Server responded with ${res.status}`);
       return res.json();
     })
     .then(data => {
-      console.log('[Graph build] Combining network, splitting intersections, clustering, and bridging any remaining gaps — this may take a moment...');
+      console.log('[Graph build] Combining network and splitting at real intersections — this may take a moment...');
       networkGraph = buildCombinedGraph(data);
 
-      const islandCount = countIslands(networkGraph);
       console.log('Network graph nodes:', Object.keys(networkGraph).length);
-      console.log('Network graph islands (should be 1):', islandCount);
-
-      if (islandCount > 1) {
-        console.warn('[Diagnostic] Network STILL has disconnected islands even after bridging — these gaps are wider than the bridge limit and genuinely need fixing in ArcMap:');
-        logIslandDetails(networkGraph);
-      }
+      console.log('Network graph islands (should be 1):', countIslands(networkGraph));
 
       dataReady.network = true;
       checkAllDataReady();
@@ -365,7 +296,7 @@ window.addEventListener('resize', () => {
 
 
 function checkAllDataReady() {
-  if (dataReady.buildings && dataReady.network && dataReady.landmarks && dataReady.accessPoints) {
+  if (dataReady.buildings && dataReady.network && dataReady.landmarks) {
     document.getElementById('loading-overlay').classList.add('hidden');
     document.getElementById('dest-input').disabled = false;
     document.getElementById('search-btn').disabled = false;
@@ -627,7 +558,7 @@ function extractNamedLocations(geojson) {
     const centroid = turf.centroid(feature);
     const coord = centroid.geometry.coordinates;
 
-    results.push({ name, coord, id: feature.properties.OBJECTID });
+    results.push({ name, coord });
   });
 
   return results;
@@ -643,7 +574,6 @@ destInput.addEventListener('input', () => {
   if (query.length === 0) {
     destCoord = null;
     destName = null;
-    destBuildingId = null;
     clearHighlight();
     return;
   }
@@ -658,7 +588,6 @@ destInput.addEventListener('input', () => {
       destInput.value = match.name;
       destCoord = match.coord;
       destName = match.name;
-      destBuildingId = match.id;
       suggestionsBox.innerHTML = '';
       highlightDestination(match.name);
     });
@@ -749,7 +678,6 @@ document.getElementById('search-again-btn').addEventListener('click', () => {
   destInput.value = '';
   destCoord = null;
   destName = null;
-  destBuildingId = null;
   clearHighlight();
   clearRoute();
   updateStatus('Search for a destination to begin.');
@@ -822,39 +750,28 @@ function calculateWeightedMinutes(routeCoords, edgeRealArray, mode) {
 function calculateAndDrawRoute() {
   const graph = networkGraph;
 
-  const destPoints = (destBuildingId !== null && destBuildingId !== undefined &&
-                       accessPointsByBuilding[destBuildingId] &&
-                       accessPointsByBuilding[destBuildingId].length > 0)
-    ? accessPointsByBuilding[destBuildingId]
-    : [destCoord];
-
   const startCandidates = findNearestNodes(graph, originCoord);
+  const endCandidates = findNearestNodes(graph, destCoord);
 
   let bestRoute = null;
   let bestTotal = Infinity;
   let bestStartSnap = 0;
   let bestEndSnap = 0;
-  let bestDestPoint = null;
 
-  destPoints.forEach(destPoint => {
-    const endCandidates = findNearestNodes(graph, destPoint);
+  startCandidates.forEach(startC => {
+    endCandidates.forEach(endC => {
+      const candidateRoute = findShortestPath(graph, startC.node, endC.node, currentMode);
+      if (!candidateRoute) return;
 
-    startCandidates.forEach(startC => {
-      endCandidates.forEach(endC => {
-        const candidateRoute = findShortestPath(graph, startC.node, endC.node, currentMode);
-        if (!candidateRoute) return;
+      const graphDist = calculateTotalDistance(candidateRoute);
+      const total = startC.dist + graphDist + endC.dist;
 
-        const graphDist = calculateTotalDistance(candidateRoute);
-        const total = startC.dist + graphDist + endC.dist;
-
-        if (total < bestTotal) {
-          bestTotal = total;
-          bestRoute = candidateRoute;
-          bestStartSnap = startC.dist;
-          bestEndSnap = endC.dist;
-          bestDestPoint = destPoint;
-        }
-      });
+      if (total < bestTotal) {
+        bestTotal = total;
+        bestRoute = candidateRoute;
+        bestStartSnap = startC.dist;
+        bestEndSnap = endC.dist;
+      }
     });
   });
 
@@ -998,146 +915,9 @@ function splitSegmentsAtIntersections(segments) {
   return finalSegments;
 }
 
-function clusterEndpointsByDistance(segments, thresholdMeters) {
-  const uniqueMap = new Map();
-  segments.forEach(seg => {
-    [seg.p1, seg.p2].forEach(p => {
-      const key = p.map(n => n.toFixed(7)).join(',');
-      if (!uniqueMap.has(key)) uniqueMap.set(key, p);
-    });
-  });
-  const uniquePoints = Array.from(uniqueMap.values());
-  const keys = Array.from(uniqueMap.keys());
-
-  const parent = uniquePoints.map((_, i) => i);
-  function find(i) {
-    while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; }
-    return i;
-  }
-  function union(i, j) {
-    const ri = find(i), rj = find(j);
-    if (ri !== rj) parent[ri] = rj;
-  }
-
-  for (let i = 0; i < uniquePoints.length; i++) {
-    for (let j = i + 1; j < uniquePoints.length; j++) {
-      if (turf.distance(uniquePoints[i], uniquePoints[j], { units: 'meters' }) <= thresholdMeters) {
-        union(i, j);
-      }
-    }
-  }
-
-  const groups = {};
-  uniquePoints.forEach((p, i) => {
-    const root = find(i);
-    if (!groups[root]) groups[root] = [];
-    groups[root].push(p);
-  });
-
-  const canonicalByRoot = {};
-  Object.keys(groups).forEach(root => {
-    const pts = groups[root];
-    const avgLng = pts.reduce((s, p) => s + p[0], 0) / pts.length;
-    const avgLat = pts.reduce((s, p) => s + p[1], 0) / pts.length;
-    canonicalByRoot[root] = [avgLng, avgLat];
-  });
-
-  const lookup = new Map();
-  uniquePoints.forEach((p, i) => {
-    lookup.set(keys[i], canonicalByRoot[find(i)]);
-  });
-
-  function mapPoint(p) {
-    const key = p.map(n => n.toFixed(7)).join(',');
-    return lookup.get(key) || p;
-  }
-
-  return segments.map(seg => ({
-    p1: mapPoint(seg.p1),
-    p2: mapPoint(seg.p2),
-    walkable: seg.walkable,
-    drivable: seg.drivable
-  }));
-}
-
-// NEW: last-resort bridging. Runs AFTER clustering. Finds every
-// disconnected island, and — ONLY if the gap between it and the
-// largest (main) island is within MAX_BRIDGE_METERS — adds one
-// synthetic connecting edge. Anything wider than that limit is left
-// alone and reported, since bridging a large real gap risks inventing
-// a route through a wall, a fence, or open ground that doesn't
-// actually exist as a walkable/drivable path.
-function bridgeRemainingIslands(graph) {
-  const nodeKeys = Object.keys(graph);
-  if (nodeKeys.length === 0) return graph;
-
-  const visited = new Set();
-  const islands = [];
-
-  nodeKeys.forEach(startNode => {
-    if (visited.has(startNode)) return;
-    const clusterNodes = [];
-    const stack = [startNode];
-    while (stack.length > 0) {
-      const current = stack.pop();
-      if (visited.has(current)) continue;
-      visited.add(current);
-      clusterNodes.push(current);
-      graph[current].forEach(neighbor => {
-        const neighborKey = neighbor.node.map(n => n.toFixed(6)).join(',');
-        if (!visited.has(neighborKey)) stack.push(neighborKey);
-      });
-    }
-    islands.push(clusterNodes);
-  });
-
-  if (islands.length <= 1) return graph;
-
-  islands.sort((a, b) => b.length - a.length);
-  const mainIsland = islands[0];
-  const mainCoords = mainIsland.map(k => k.split(',').map(Number));
-
-  for (let i = 1; i < islands.length; i++) {
-    const islandCoords = islands[i].map(k => k.split(',').map(Number));
-
-    let bestPairDist = Infinity;
-    let bestIslandPoint = null;
-    let bestMainPoint = null;
-
-    islandCoords.forEach(ip => {
-      mainCoords.forEach(mp => {
-        const d = turf.distance(ip, mp, { units: 'meters' });
-        if (d < bestPairDist) {
-          bestPairDist = d;
-          bestIslandPoint = ip;
-          bestMainPoint = mp;
-        }
-      });
-    });
-
-    if (bestPairDist <= MAX_BRIDGE_METERS) {
-      const nodeA = bestIslandPoint.map(n => n.toFixed(6)).join(',');
-      const nodeB = bestMainPoint.map(n => n.toFixed(6)).join(',');
-
-      // Synthetic bridge: walkable, but NOT drivable — a safe default
-      // that renders as the dashed/orange fallback style, consistent
-      // with how genuine walk-only stretches already look.
-      graph[nodeA].push({ node: bestMainPoint, weight: bestPairDist, walkable: true, drivable: false });
-      graph[nodeB].push({ node: bestIslandPoint, weight: bestPairDist, walkable: true, drivable: false });
-
-      console.warn(`[Bridge] Connected a ${islandCoords.length}-node island to the main network with a ${bestPairDist.toFixed(1)}m synthetic connector at [${bestIslandPoint[0].toFixed(6)}, ${bestIslandPoint[1].toFixed(6)}]. This is NOT a digitized path — treat this as temporary and fix the real gap in ArcMap when possible.`);
-    } else {
-      console.warn(`[Bridge] Could NOT bridge a ${islandCoords.length}-node island — nearest gap to main network is ${bestPairDist.toFixed(1)}m, over the ${MAX_BRIDGE_METERS}m safety limit. This one still needs a real fix in ArcMap.`);
-    }
-  }
-
-  return graph;
-}
-
 function buildCombinedGraph(geojson) {
   const rawSegments = extractAllSegments(geojson);
-  const splitSegments = splitSegmentsAtIntersections(rawSegments);
-  const clusteredSegments = clusterEndpointsByDistance(splitSegments, CLUSTER_THRESHOLD_METERS);
+  const repairedSegments = splitSegmentsAtIntersections(rawSegments);
 
   const graph = {};
 
@@ -1145,9 +925,7 @@ function buildCombinedGraph(geojson) {
     return coord.map(n => n.toFixed(6)).join(',');
   }
 
-  clusteredSegments.forEach(({ p1, p2, walkable, drivable }) => {
-    if (pointsClose(p1, p2)) return;
-
+  repairedSegments.forEach(({ p1, p2, walkable, drivable }) => {
     const nodeA = snap(p1);
     const nodeB = snap(p2);
     const dist = turf.distance(p1, p2, { units: 'meters' });
@@ -1159,7 +937,7 @@ function buildCombinedGraph(geojson) {
     graph[nodeB].push({ node: p1, weight: dist, walkable, drivable });
   });
 
-  return bridgeRemainingIslands(graph);
+  return graph;
 }
 
 function countIslands(graph) {
@@ -1182,31 +960,6 @@ function countIslands(graph) {
   });
 
   return islands;
-}
-
-function logIslandDetails(graph) {
-  const visited = new Set();
-
-  Object.keys(graph).forEach(startNode => {
-    if (visited.has(startNode)) return;
-    const clusterNodes = [];
-    const stack = [startNode];
-    while (stack.length > 0) {
-      const current = stack.pop();
-      if (visited.has(current)) continue;
-      visited.add(current);
-      clusterNodes.push(current);
-      graph[current].forEach(neighbor => {
-        const neighborKey = neighbor.node.map(n => n.toFixed(6)).join(',');
-        if (!visited.has(neighborKey)) stack.push(neighborKey);
-      });
-    }
-
-    const coords = clusterNodes.map(n => n.split(',').map(Number));
-    const avgLng = coords.reduce((s, c) => s + c[0], 0) / coords.length;
-    const avgLat = coords.reduce((s, c) => s + c[1], 0) / coords.length;
-    console.log(`  Island: ${clusterNodes.length} nodes, approx. center [${avgLng.toFixed(6)}, ${avgLat.toFixed(6)}]`);
-  });
 }
 
 function findShortestPath(graph, startCoord, endCoord, mode) {
