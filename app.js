@@ -13,11 +13,14 @@ const map = new mapboxgl.Map({
 let networkGraph = {};
 
 const MODE_PENALTY_MULTIPLIER = 20;
-
-// NEW: how close (in real meters) two endpoints must be to be treated
-// as the same physical point. Bumped up from the previous grid-based
-// ~1m to a proper 2m radius, using real distance rather than a grid.
 const CLUSTER_THRESHOLD_METERS = 2;
+
+// NEW: last-resort bridge distance — if a disconnected island can't
+// reach the main network within this many meters, it's bridged with a
+// synthetic connector (rendered dashed/orange, and logged loudly).
+// Kept deliberately short so this can't silently paper over a
+// genuinely large, meaningful gap.
+const MAX_BRIDGE_METERS = 25;
 
 let currentMode = 'walk';
 let originCoord = null;
@@ -321,7 +324,7 @@ map.on('load', () => {
       return res.json();
     })
     .then(data => {
-      console.log('[Graph build] Combining network, splitting intersections, and clustering nearby endpoints — this may take a moment...');
+      console.log('[Graph build] Combining network, splitting intersections, clustering, and bridging any remaining gaps — this may take a moment...');
       networkGraph = buildCombinedGraph(data);
 
       const islandCount = countIslands(networkGraph);
@@ -329,7 +332,7 @@ map.on('load', () => {
       console.log('Network graph islands (should be 1):', islandCount);
 
       if (islandCount > 1) {
-        console.warn('[Diagnostic] Network still has disconnected islands after clustering — listing them below (size + approximate center):');
+        console.warn('[Diagnostic] Network STILL has disconnected islands even after bridging — these gaps are wider than the bridge limit and genuinely need fixing in ArcMap:');
         logIslandDetails(networkGraph);
       }
 
@@ -995,13 +998,6 @@ function splitSegmentsAtIntersections(segments) {
   return finalSegments;
 }
 
-// CHANGED: proper distance-based clustering (union-find), replacing
-// the previous grid-rounding approach. Every unique endpoint is
-// compared against every other by real geographic distance; any two
-// within CLUSTER_THRESHOLD_METERS are merged into one shared canonical
-// point (the average position of everything in that cluster). This
-// correctly catches near-miss gaps regardless of where they happen to
-// fall relative to a rounding grid.
 function clusterEndpointsByDistance(segments, thresholdMeters) {
   const uniqueMap = new Map();
   segments.forEach(seg => {
@@ -1064,6 +1060,80 @@ function clusterEndpointsByDistance(segments, thresholdMeters) {
   }));
 }
 
+// NEW: last-resort bridging. Runs AFTER clustering. Finds every
+// disconnected island, and — ONLY if the gap between it and the
+// largest (main) island is within MAX_BRIDGE_METERS — adds one
+// synthetic connecting edge. Anything wider than that limit is left
+// alone and reported, since bridging a large real gap risks inventing
+// a route through a wall, a fence, or open ground that doesn't
+// actually exist as a walkable/drivable path.
+function bridgeRemainingIslands(graph) {
+  const nodeKeys = Object.keys(graph);
+  if (nodeKeys.length === 0) return graph;
+
+  const visited = new Set();
+  const islands = [];
+
+  nodeKeys.forEach(startNode => {
+    if (visited.has(startNode)) return;
+    const clusterNodes = [];
+    const stack = [startNode];
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (visited.has(current)) continue;
+      visited.add(current);
+      clusterNodes.push(current);
+      graph[current].forEach(neighbor => {
+        const neighborKey = neighbor.node.map(n => n.toFixed(6)).join(',');
+        if (!visited.has(neighborKey)) stack.push(neighborKey);
+      });
+    }
+    islands.push(clusterNodes);
+  });
+
+  if (islands.length <= 1) return graph;
+
+  islands.sort((a, b) => b.length - a.length);
+  const mainIsland = islands[0];
+  const mainCoords = mainIsland.map(k => k.split(',').map(Number));
+
+  for (let i = 1; i < islands.length; i++) {
+    const islandCoords = islands[i].map(k => k.split(',').map(Number));
+
+    let bestPairDist = Infinity;
+    let bestIslandPoint = null;
+    let bestMainPoint = null;
+
+    islandCoords.forEach(ip => {
+      mainCoords.forEach(mp => {
+        const d = turf.distance(ip, mp, { units: 'meters' });
+        if (d < bestPairDist) {
+          bestPairDist = d;
+          bestIslandPoint = ip;
+          bestMainPoint = mp;
+        }
+      });
+    });
+
+    if (bestPairDist <= MAX_BRIDGE_METERS) {
+      const nodeA = bestIslandPoint.map(n => n.toFixed(6)).join(',');
+      const nodeB = bestMainPoint.map(n => n.toFixed(6)).join(',');
+
+      // Synthetic bridge: walkable, but NOT drivable — a safe default
+      // that renders as the dashed/orange fallback style, consistent
+      // with how genuine walk-only stretches already look.
+      graph[nodeA].push({ node: bestMainPoint, weight: bestPairDist, walkable: true, drivable: false });
+      graph[nodeB].push({ node: bestIslandPoint, weight: bestPairDist, walkable: true, drivable: false });
+
+      console.warn(`[Bridge] Connected a ${islandCoords.length}-node island to the main network with a ${bestPairDist.toFixed(1)}m synthetic connector at [${bestIslandPoint[0].toFixed(6)}, ${bestIslandPoint[1].toFixed(6)}]. This is NOT a digitized path — treat this as temporary and fix the real gap in ArcMap when possible.`);
+    } else {
+      console.warn(`[Bridge] Could NOT bridge a ${islandCoords.length}-node island — nearest gap to main network is ${bestPairDist.toFixed(1)}m, over the ${MAX_BRIDGE_METERS}m safety limit. This one still needs a real fix in ArcMap.`);
+    }
+  }
+
+  return graph;
+}
+
 function buildCombinedGraph(geojson) {
   const rawSegments = extractAllSegments(geojson);
   const splitSegments = splitSegmentsAtIntersections(rawSegments);
@@ -1089,7 +1159,7 @@ function buildCombinedGraph(geojson) {
     graph[nodeB].push({ node: p1, weight: dist, walkable, drivable });
   });
 
-  return graph;
+  return bridgeRemainingIslands(graph);
 }
 
 function countIslands(graph) {
