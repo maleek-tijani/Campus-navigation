@@ -47,8 +47,6 @@ let lastHeading = null;
 let followResumeTimer = null;
 const FOLLOW_RESUME_DELAY_MS = 4000;
 
-// NEW: "marching ants" animated line state — only runs while actively
-// navigating, cycling the solid layer's dash pattern to simulate flow.
 let routeAnimTimer = null;
 let dashStep = 0;
 const dashSequence = [
@@ -68,9 +66,8 @@ const dashSequence = [
   [0, 3.5, 3, 0.5]
 ];
 
-// NEW: photo preview state
-let photoHideTimer = null;
-const PHOTO_AUTO_HIDE_MS = 6000;
+// CHANGED: auto-hide timer removed entirely — the photo now stays on
+// screen until the user taps the close (×) button.
 
 let dataReady = {
   buildings: false,
@@ -89,9 +86,6 @@ map.on('load', () => {
 
   map.setConfigProperty('basemap', 'show3dObjects', false);
 
-  // NEW: apply lighting matched to the real current time of day, and
-  // re-check periodically in case a session runs long across a
-  // dawn/day/dusk/night boundary.
   applyTimeOfDayLighting();
   setInterval(applyTimeOfDayLighting, 15 * 60 * 1000);
 
@@ -317,7 +311,6 @@ window.addEventListener('resize', () => {
 });
 
 
-// NEW: applies dawn/day/dusk/night lighting based on the real local hour.
 function applyTimeOfDayLighting() {
   const hour = new Date().getHours();
   let preset;
@@ -344,10 +337,6 @@ function showLoadError(message) {
 }
 
 
-// ── NEW: BUILDING PHOTO PREVIEW ───────────────────────────────────
-
-// Converts a building name into the exact filename format expected in
-// /photos/ — lowercase, spaces and punctuation replaced with hyphens.
 function slugify(name) {
   return name
     .toLowerCase()
@@ -356,6 +345,8 @@ function slugify(name) {
     .replace(/^-+|-+$/g, '');
 }
 
+// CHANGED: no more auto-hide timer — the card shows once loaded and
+// stays until the user closes it manually via the × button.
 function showBuildingPhoto(name) {
   if (!name) return;
 
@@ -365,18 +356,12 @@ function showBuildingPhoto(name) {
   const slug = slugify(name);
   const path = `photos/${slug}.jpg`;
 
-  // If the image genuinely fails to load (no photo exists for this
-  // building yet), the card simply never appears — no visible error.
   img.onerror = () => {
     panel.classList.add('hidden');
   };
 
   img.onload = () => {
     panel.classList.remove('hidden');
-    clearTimeout(photoHideTimer);
-    photoHideTimer = setTimeout(() => {
-      panel.classList.add('hidden');
-    }, PHOTO_AUTO_HIDE_MS);
   };
 
   caption.textContent = name;
@@ -385,11 +370,8 @@ function showBuildingPhoto(name) {
 
 document.getElementById('photo-close-btn').addEventListener('click', () => {
   document.getElementById('photo-preview').classList.add('hidden');
-  clearTimeout(photoHideTimer);
 });
 
-
-// ── NEW: ANIMATED "MARCHING ANTS" ROUTE LINE ─────────────────────
 
 function startLineAnimation() {
   if (routeAnimTimer) return;
@@ -407,7 +389,7 @@ function stopLineAnimation() {
     routeAnimTimer = null;
   }
   if (map.getLayer('route-line-solid')) {
-    map.setPaintProperty('route-line-solid', 'line-dasharray', [1, 0]); // effectively solid again
+    map.setPaintProperty('route-line-solid', 'line-dasharray', [1, 0]);
   }
 }
 
@@ -632,7 +614,7 @@ function checkNavigationProgress(liveCoord) {
   if (distToDest < 15) {
     speak('You have arrived at your destination.');
     navigationActive = false;
-    stopLineAnimation(); // NEW: stop the flowing animation on arrival
+    stopLineAnimation();
     return;
   }
 
@@ -742,8 +724,8 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
   lastHeading = null;
 
   requestCompass();
-  startLineAnimation();          // NEW
-  showBuildingPhoto(destName);   // NEW
+  startLineAnimation();
+  showBuildingPhoto(destName);
 
   map.stop();
   map.easeTo({ center: originCoord, zoom: NAV_ZOOM, duration: 800 });
@@ -775,10 +757,9 @@ document.getElementById('search-again-btn').addEventListener('click', () => {
   turnPoints = [];
   arrivalTarget = null;
   clearTimeout(followResumeTimer);
-  stopLineAnimation(); // NEW
+  stopLineAnimation();
 
-  document.getElementById('photo-preview').classList.add('hidden'); // NEW
-  clearTimeout(photoHideTimer);
+  document.getElementById('photo-preview').classList.add('hidden');
 
   document.getElementById('nav-controls').classList.add('hidden');
   document.getElementById('search-controls').classList.remove('hidden');
