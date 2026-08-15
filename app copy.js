@@ -47,31 +47,6 @@ let lastHeading = null;
 let followResumeTimer = null;
 const FOLLOW_RESUME_DELAY_MS = 4000;
 
-// NEW: "marching ants" animated line state — only runs while actively
-// navigating, cycling the solid layer's dash pattern to simulate flow.
-let routeAnimTimer = null;
-let dashStep = 0;
-const dashSequence = [
-  [0, 4, 3],
-  [0.5, 4, 2.5],
-  [1, 4, 2],
-  [1.5, 4, 1.5],
-  [2, 4, 1],
-  [2.5, 4, 0.5],
-  [3, 4, 0],
-  [0, 0.5, 3, 3.5],
-  [0, 1, 3, 3],
-  [0, 1.5, 3, 2.5],
-  [0, 2, 3, 2],
-  [0, 2.5, 3, 1.5],
-  [0, 3, 3, 1],
-  [0, 3.5, 3, 0.5]
-];
-
-// NEW: photo preview state
-let photoHideTimer = null;
-const PHOTO_AUTO_HIDE_MS = 6000;
-
 let dataReady = {
   buildings: false,
   network: false,
@@ -88,12 +63,6 @@ function normalizeName(name) {
 map.on('load', () => {
 
   map.setConfigProperty('basemap', 'show3dObjects', false);
-
-  // NEW: apply lighting matched to the real current time of day, and
-  // re-check periodically in case a session runs long across a
-  // dawn/day/dusk/night boundary.
-  applyTimeOfDayLighting();
-  setInterval(applyTimeOfDayLighting, 15 * 60 * 1000);
 
   map.addSource('campus-paths', {
     type: 'geojson',
@@ -185,6 +154,9 @@ map.on('load', () => {
         }
       });
 
+      // CHANGED: clicking a building now ALSO shows a popup with its
+      // name, right where you clicked — this replaces the permanent
+      // always-on labels, so names only appear on demand.
       map.on('click', 'buildings-3d', (e) => {
         if (!dataReady.buildings || !dataReady.network) return;
 
@@ -204,6 +176,9 @@ map.on('load', () => {
         document.getElementById('suggestions').innerHTML = '';
         if (destName) highlightDestination(destName);
       });
+
+      // REMOVED: building-labels-layer and its source — no more
+      // permanent name labels rendered on load.
 
       buildingList = buildingList.concat(extractNamedLocations(data));
       buildingList.sort((a, b) => a.name.localeCompare(b.name));
@@ -246,6 +221,9 @@ map.on('load', () => {
         }
       });
 
+      // REMOVED: landmarks-label-layer — no more permanent labels here
+      // either. The existing click-to-popup behavior below already
+      // covers "click to see the name," so it's kept as-is.
       map.on('click', 'landmarks-point', (e) => {
         const name = e.features[0].properties.Name || 'Unnamed landmark';
         new mapboxgl.Popup()
@@ -317,19 +295,6 @@ window.addEventListener('resize', () => {
 });
 
 
-// NEW: applies dawn/day/dusk/night lighting based on the real local hour.
-function applyTimeOfDayLighting() {
-  const hour = new Date().getHours();
-  let preset;
-  if (hour >= 5 && hour < 8) preset = 'dawn';
-  else if (hour >= 8 && hour < 17) preset = 'day';
-  else if (hour >= 17 && hour < 19) preset = 'dusk';
-  else preset = 'night';
-
-  map.setConfigProperty('basemap', 'lightPreset', preset);
-}
-
-
 function checkAllDataReady() {
   if (dataReady.buildings && dataReady.network && dataReady.landmarks) {
     document.getElementById('loading-overlay').classList.add('hidden');
@@ -341,74 +306,6 @@ function checkAllDataReady() {
 
 function showLoadError(message) {
   document.getElementById('loading-box').innerHTML = `<p style="color:#c0392b;">${message}</p>`;
-}
-
-
-// ── NEW: BUILDING PHOTO PREVIEW ───────────────────────────────────
-
-// Converts a building name into the exact filename format expected in
-// /photos/ — lowercase, spaces and punctuation replaced with hyphens.
-function slugify(name) {
-  return name
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
-function showBuildingPhoto(name) {
-  if (!name) return;
-
-  const img = document.getElementById('photo-img');
-  const caption = document.getElementById('photo-caption');
-  const panel = document.getElementById('photo-preview');
-  const slug = slugify(name);
-  const path = `photos/${slug}.jpg`;
-
-  // If the image genuinely fails to load (no photo exists for this
-  // building yet), the card simply never appears — no visible error.
-  img.onerror = () => {
-    panel.classList.add('hidden');
-  };
-
-  img.onload = () => {
-    panel.classList.remove('hidden');
-    clearTimeout(photoHideTimer);
-    photoHideTimer = setTimeout(() => {
-      panel.classList.add('hidden');
-    }, PHOTO_AUTO_HIDE_MS);
-  };
-
-  caption.textContent = name;
-  img.src = path;
-}
-
-document.getElementById('photo-close-btn').addEventListener('click', () => {
-  document.getElementById('photo-preview').classList.add('hidden');
-  clearTimeout(photoHideTimer);
-});
-
-
-// ── NEW: ANIMATED "MARCHING ANTS" ROUTE LINE ─────────────────────
-
-function startLineAnimation() {
-  if (routeAnimTimer) return;
-  routeAnimTimer = setInterval(() => {
-    dashStep = (dashStep + 1) % dashSequence.length;
-    if (map.getLayer('route-line-solid')) {
-      map.setPaintProperty('route-line-solid', 'line-dasharray', dashSequence[dashStep]);
-    }
-  }, 80);
-}
-
-function stopLineAnimation() {
-  if (routeAnimTimer) {
-    clearInterval(routeAnimTimer);
-    routeAnimTimer = null;
-  }
-  if (map.getLayer('route-line-solid')) {
-    map.setPaintProperty('route-line-solid', 'line-dasharray', [1, 0]); // effectively solid again
-  }
 }
 
 
@@ -632,7 +529,6 @@ function checkNavigationProgress(liveCoord) {
   if (distToDest < 15) {
     speak('You have arrived at your destination.');
     navigationActive = false;
-    stopLineAnimation(); // NEW: stop the flowing animation on arrival
     return;
   }
 
@@ -742,8 +638,6 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
   lastHeading = null;
 
   requestCompass();
-  startLineAnimation();          // NEW
-  showBuildingPhoto(destName);   // NEW
 
   map.stop();
   map.easeTo({ center: originCoord, zoom: NAV_ZOOM, duration: 800 });
@@ -775,10 +669,6 @@ document.getElementById('search-again-btn').addEventListener('click', () => {
   turnPoints = [];
   arrivalTarget = null;
   clearTimeout(followResumeTimer);
-  stopLineAnimation(); // NEW
-
-  document.getElementById('photo-preview').classList.add('hidden'); // NEW
-  clearTimeout(photoHideTimer);
 
   document.getElementById('nav-controls').classList.add('hidden');
   document.getElementById('search-controls').classList.remove('hidden');
