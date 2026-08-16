@@ -44,11 +44,6 @@ let turnPoints = [];
 let compassActive = false;
 let lastHeading = null;
 
-// NEW: tracks whether the one-time "which way to face" announcement
-// has happened yet for the current navigation session.
-let initialDirectionAnnounced = false;
-let initialDirectionFallbackTimer = null;
-
 let followResumeTimer = null;
 const FOLLOW_RESUME_DELAY_MS = 4000;
 
@@ -70,6 +65,9 @@ const dashSequence = [
   [0, 3, 3, 1],
   [0, 3.5, 3, 0.5]
 ];
+
+// CHANGED: auto-hide timer removed entirely — the photo now stays on
+// screen until the user taps the close (×) button.
 
 let dataReady = {
   buildings: false,
@@ -347,6 +345,8 @@ function slugify(name) {
     .replace(/^-+|-+$/g, '');
 }
 
+// CHANGED: no more auto-hide timer — the card shows once loaded and
+// stays until the user closes it manually via the × button.
 function showBuildingPhoto(name) {
   if (!name) return;
 
@@ -542,40 +542,6 @@ function requestCompass() {
   }
 }
 
-// NEW: normalizes an angle difference (target minus current heading)
-// into the range -180..180, so positive means "turn right" and
-// negative means "turn left," regardless of how the raw values wrap
-// around 0/360.
-function normalizeAngleDiff(target, current) {
-  return ((target - current + 540) % 360) - 180;
-}
-
-// NEW: one-time announcement, the first time real compass data arrives
-// after Start Navigation is pressed, telling the user exactly which
-// way to turn (if at all) to face the route's actual initial direction
-// — instead of always assuming they're already facing the right way.
-function announceInitialDirection(currentHeading) {
-  if (initialDirectionAnnounced) return;
-  if (currentRoute.length < 2) return;
-
-  const nextPoint = currentRoute[1];
-  const targetBearing = turf.bearing(originCoord, nextPoint);
-  const diff = normalizeAngleDiff(targetBearing, currentHeading);
-
-  initialDirectionAnnounced = true;
-  clearTimeout(initialDirectionFallbackTimer);
-
-  if (Math.abs(diff) < 30) {
-    speak('Continue straight.');
-  } else if (Math.abs(diff) > 150) {
-    speak('Turn around to face your route.');
-  } else if (diff > 0) {
-    speak('Turn right to face your route.');
-  } else {
-    speak('Turn left to face your route.');
-  }
-}
-
 function handleOrientation(event) {
   if (!navigationActive || !followMode) return;
 
@@ -583,12 +549,6 @@ function handleOrientation(event) {
   if (heading === undefined || heading === null) {
     if (event.alpha === null) return;
     heading = 360 - event.alpha;
-  }
-
-  // NEW: run the one-time initial-direction check as soon as real
-  // heading data starts arriving.
-  if (!initialDirectionAnnounced) {
-    announceInitialDirection(heading);
   }
 
   if (lastHeading !== null) {
@@ -762,7 +722,6 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
   followMode = true;
   navigationActive = true;
   lastHeading = null;
-  initialDirectionAnnounced = false; // NEW: reset for this session
 
   requestCompass();
   startLineAnimation();
@@ -771,31 +730,13 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
   map.stop();
   map.easeTo({ center: originCoord, zoom: NAV_ZOOM, duration: 800 });
 
-  // CHANGED: the button itself now displays navigation status instead
-  // of the top status pill — becomes non-interactive while active.
-  const startBtn = document.getElementById('start-nav-btn');
-  startBtn.textContent = 'Navigating — follow the blue line';
-  startBtn.disabled = true;
-  startBtn.classList.add('is-navigating');
+  updateStatus('Navigating — follow the blue line.');
 
-  document.getElementById('status-bar').classList.add('hidden'); // NEW: frees space for the photo
-
-  speak('Navigation started.');
-
-  // NEW: fallback in case compass data never arrives (permission
-  // denied, or no compass hardware) — ensures direction guidance is
-  // still spoken either way, just with the older generic phrasing.
-  clearTimeout(initialDirectionFallbackTimer);
-  initialDirectionFallbackTimer = setTimeout(() => {
-    if (!initialDirectionAnnounced) {
-      initialDirectionAnnounced = true;
-      if (turnPoints.length > 0) {
-        speak('Continue straight.');
-      } else {
-        speak('Head straight to your destination.');
-      }
-    }
-  }, 2500);
+  if (turnPoints.length > 0) {
+    speak('Navigation started. Continue straight.');
+  } else {
+    speak('Navigation started. Head straight to your destination.');
+  }
 });
 
 document.getElementById('recenter-btn').addEventListener('click', () => {
@@ -816,18 +757,9 @@ document.getElementById('search-again-btn').addEventListener('click', () => {
   turnPoints = [];
   arrivalTarget = null;
   clearTimeout(followResumeTimer);
-  clearTimeout(initialDirectionFallbackTimer);
   stopLineAnimation();
 
   document.getElementById('photo-preview').classList.add('hidden');
-
-  // CHANGED: restore the button to its original, clickable state.
-  const startBtn = document.getElementById('start-nav-btn');
-  startBtn.textContent = 'Start Navigation';
-  startBtn.disabled = true; // stays disabled until a new route exists
-  startBtn.classList.remove('is-navigating');
-
-  document.getElementById('status-bar').classList.remove('hidden'); // NEW: bring status pill back
 
   document.getElementById('nav-controls').classList.add('hidden');
   document.getElementById('search-controls').classList.remove('hidden');

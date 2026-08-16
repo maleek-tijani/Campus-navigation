@@ -41,19 +41,17 @@ html, body { height: 100%; margin: 0; padding: 0; }
   text-align: center;
 }
 
-#status-bar.hidden { display: none; }
-
-/* CHANGED: moved up and enlarged, now that the status pill hides
-   during navigation and frees this space */
+/* CHANGED: moved down (top increased) and shrunk (width/photo height
+   reduced), per request */
 #photo-preview {
   position: absolute;
-  top: 65px;
+  top: 140px;
   right: 10px;
   z-index: 4;
   background: white;
   border-radius: 10px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-  width: 200px;
+  width: 160px;
   overflow: hidden;
   font-family: sans-serif;
   animation: photo-fade-in 0.3s ease;
@@ -63,15 +61,15 @@ html, body { height: 100%; margin: 0; padding: 0; }
 
 #photo-img {
   width: 100%;
-  height: 130px;
+  height: 100px;
   object-fit: cover;
   display: block;
 }
 
 #photo-caption {
   margin: 0;
-  padding: 8px 10px;
-  font-size: 13px;
+  padding: 6px 8px;
+  font-size: 12px;
   font-weight: bold;
   color: #1a1a1a;
   text-align: center;
@@ -81,14 +79,14 @@ html, body { height: 100%; margin: 0; padding: 0; }
   position: absolute;
   top: 6px;
   right: 6px;
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   border: none;
   border-radius: 50%;
   background: rgba(0,0,0,0.5);
   color: white;
-  font-size: 14px;
-  line-height: 22px;
+  font-size: 13px;
+  line-height: 20px;
   text-align: center;
   cursor: pointer;
   padding: 0;
@@ -223,18 +221,6 @@ html, body { height: 100%; margin: 0; padding: 0; }
   box-shadow: none;
 }
 
-/* NEW: once navigation is active, the button becomes a static status
-   label instead of a pulsing call-to-action — different visual state
-   from the plain disabled/unavailable look above. */
-#start-nav-btn.is-navigating {
-  background: #1565c0;
-  color: white;
-  animation: none;
-  cursor: default;
-  text-transform: none;
-  letter-spacing: normal;
-}
-
 #recenter-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 @keyframes pulse-glow {
@@ -305,7 +291,8 @@ html, body { height: 100%; margin: 0; padding: 0; }
     padding-bottom: max(18px, env(safe-area-inset-bottom));
   }
 
+  /* CHANGED: adjusted mobile top offset to match the new desktop position */
   #photo-preview {
-    top: 10px;
+    top: 60px;
   }
 }
