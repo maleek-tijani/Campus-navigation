@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Campus Navigation</title>
+  <link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="map"></div>
+
+  <div id="loading-overlay">
+    <div id="loading-box">
+      <p>Loading campus data...</p>
+    </div>
+  </div>
+
+  <div id="status-bar"><p id="status">Loading campus data, please wait...</p></div>
+
+  <div id="photo-preview" class="hidden">
+    <button id="photo-close-btn" aria-label="Close">&times;</button>
+    <img id="photo-img" src="" alt="">
+    <p id="photo-caption"></p>
+  </div>
+
+  <div id="panel">
+
+    <div id="search-controls">
+      <div id="mode-toggle">
+        <button id="walk-btn" class="mode-btn active">Walking</button>
+        <button id="drive-btn" class="mode-btn">Driving</button>
+      </div>
+
+      <label for="dest-input">Where to?</label>
+      <input type="text" id="dest-input" placeholder="Search a building..." disabled autocomplete="off">
+      <div id="suggestions"></div>
+
+      <button id="search-btn" disabled>Search</button>
+    </div>
+
+    <div id="nav-controls" class="hidden">
+      <p id="route-summary">Search a destination to see distance and ETA.</p>
+      <div id="nav-buttons">
+        <button id="start-nav-btn">Start Navigation</button>
+        <button id="recenter-btn">Recenter</button>
+        <button id="search-again-btn">Search again</button>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
+  <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

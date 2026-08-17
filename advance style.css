@@ -43,6 +43,8 @@ html, body { height: 100%; margin: 0; padding: 0; }
 
 #status-bar.hidden { display: none; }
 
+/* CHANGED: moved up and enlarged, now that the status pill hides
+   during navigation and frees this space */
 #photo-preview {
   position: absolute;
   top: 65px;
@@ -221,6 +223,9 @@ html, body { height: 100%; margin: 0; padding: 0; }
   box-shadow: none;
 }
 
+/* NEW: once navigation is active, the button becomes a static status
+   label instead of a pulsing call-to-action — different visual state
+   from the plain disabled/unavailable look above. */
 #start-nav-btn.is-navigating {
   background: #1565c0;
   color: white;

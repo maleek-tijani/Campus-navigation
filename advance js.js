@@ -1,9 +1,10 @@
-mapboxgl.accessToken = 'pk.eyJ1IjoibWFyay10ZWUiLCJhIjoiY21zN2l3cHk2MDRjazM5cGxpc2hnbmY1cSJ9.VdHqEZXBn5LJ4QvFkUAtXw';
+// ── SETUP ──────────────────────────────────────────────────────────
+mapboxgl.accessToken = 'pk.eyJ1IjoibWFyay10ZWUiLCJhIjoiY21zN2l3cHk2MDRjazM5cGxpc2hnbmY1cSJ9.VdHqEZXBn5LJ4QvFkUAtXw'; // ⚠️ MANUAL INPUT NEEDED: your real Mapbox token
 
 const map = new mapboxgl.Map({
   container: 'map',
   style: 'mapbox://styles/mapbox/standard',
-  center: [3.82550, 7.24072],
+  center: [3.82550, 7.24072], // ⚠️ MANUAL INPUT NEEDED: your real campus coordinates (used only briefly, before the campus-wide view takes over)
   zoom: 16,
   pitch: 60,
   bearing: -20
@@ -23,7 +24,7 @@ let arrivalTarget = null;
 const WALK_SPEED_MPS = 1.4;
 const DRIVE_SPEED_MPS = 8.3;
 
-const NAV_ZOOM = 14;
+const NAV_ZOOM = 19;
 
 const SNAP_RADIUS_METERS = 40;
 const SNAP_MAX_CANDIDATES = 10;
@@ -43,6 +44,8 @@ let turnPoints = [];
 let compassActive = false;
 let lastHeading = null;
 
+// NEW: tracks whether the one-time "which way to face" announcement
+// has happened yet for the current navigation session.
 let initialDirectionAnnounced = false;
 let initialDirectionFallbackTimer = null;
 
@@ -276,6 +279,7 @@ map.on('load', () => {
       return res.json();
     })
     .then(data => {
+      console.log('[Graph build] Combining network and splitting at real intersections — this may take a moment...');
       networkGraph = buildCombinedGraph(data);
 
       console.log('Network graph nodes:', Object.keys(networkGraph).length);
@@ -290,7 +294,6 @@ map.on('load', () => {
     });
 
   startLiveLocation();
-  requestCompass();
 
   map.on('dragstart', () => {
     followMode = false;
@@ -304,13 +307,6 @@ map.on('load', () => {
   });
 
 });
-
-document.addEventListener('click', firstInteractionCompassRequest, { once: true });
-document.addEventListener('touchstart', firstInteractionCompassRequest, { once: true });
-
-function firstInteractionCompassRequest() {
-  requestCompass();
-}
 
 window.addEventListener('resize', () => {
   map.resize();
@@ -546,10 +542,18 @@ function requestCompass() {
   }
 }
 
+// NEW: normalizes an angle difference (target minus current heading)
+// into the range -180..180, so positive means "turn right" and
+// negative means "turn left," regardless of how the raw values wrap
+// around 0/360.
 function normalizeAngleDiff(target, current) {
   return ((target - current + 540) % 360) - 180;
 }
 
+// NEW: one-time announcement, the first time real compass data arrives
+// after Start Navigation is pressed, telling the user exactly which
+// way to turn (if at all) to face the route's actual initial direction
+// — instead of always assuming they're already facing the right way.
 function announceInitialDirection(currentHeading) {
   if (initialDirectionAnnounced) return;
   if (currentRoute.length < 2) return;
@@ -581,6 +585,8 @@ function handleOrientation(event) {
     heading = 360 - event.alpha;
   }
 
+  // NEW: run the one-time initial-direction check as soon as real
+  // heading data starts arriving.
   if (!initialDirectionAnnounced) {
     announceInitialDirection(heading);
   }
@@ -756,7 +762,7 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
   followMode = true;
   navigationActive = true;
   lastHeading = null;
-  initialDirectionAnnounced = false;
+  initialDirectionAnnounced = false; // NEW: reset for this session
 
   requestCompass();
   startLineAnimation();
@@ -765,15 +771,20 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
   map.stop();
   map.easeTo({ center: originCoord, zoom: NAV_ZOOM, duration: 800 });
 
+  // CHANGED: the button itself now displays navigation status instead
+  // of the top status pill — becomes non-interactive while active.
   const startBtn = document.getElementById('start-nav-btn');
   startBtn.textContent = 'Navigating — follow the blue line';
   startBtn.disabled = true;
   startBtn.classList.add('is-navigating');
 
-  document.getElementById('status-bar').classList.add('hidden');
+  document.getElementById('status-bar').classList.add('hidden'); // NEW: frees space for the photo
 
   speak('Navigation started.');
 
+  // NEW: fallback in case compass data never arrives (permission
+  // denied, or no compass hardware) — ensures direction guidance is
+  // still spoken either way, just with the older generic phrasing.
   clearTimeout(initialDirectionFallbackTimer);
   initialDirectionFallbackTimer = setTimeout(() => {
     if (!initialDirectionAnnounced) {
@@ -810,12 +821,13 @@ document.getElementById('search-again-btn').addEventListener('click', () => {
 
   document.getElementById('photo-preview').classList.add('hidden');
 
+  // CHANGED: restore the button to its original, clickable state.
   const startBtn = document.getElementById('start-nav-btn');
   startBtn.textContent = 'Start Navigation';
-  startBtn.disabled = true;
+  startBtn.disabled = true; // stays disabled until a new route exists
   startBtn.classList.remove('is-navigating');
 
-  document.getElementById('status-bar').classList.remove('hidden');
+  document.getElementById('status-bar').classList.remove('hidden'); // NEW: bring status pill back
 
   document.getElementById('nav-controls').classList.add('hidden');
   document.getElementById('search-controls').classList.remove('hidden');
@@ -940,6 +952,10 @@ function calculateAndDrawRoute() {
   const minutes = calculateWeightedMinutes(bestRoute, edgeReal, currentMode);
 
   const hasWalkFallback = currentMode === 'drive' && edgeReal.includes(false);
+
+  console.log(`[Route debug] Mode: ${currentMode}`);
+  console.log(`[Route debug] Total route distance: ${Math.round(totalMeters)}m (start snap: ${Math.round(bestStartSnap)}m, end snap: ${Math.round(bestEndSnap)}m)`);
+  console.log(`[Route debug] Includes walk-only fallback stretch: ${hasWalkFallback}`);
 
   document.getElementById('route-summary').textContent =
     `${Math.round(totalMeters)}m • approx. ${minutes} min ${currentMode === 'walk' ? 'walk' : 'drive'}`;
