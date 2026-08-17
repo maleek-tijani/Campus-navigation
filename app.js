@@ -23,7 +23,7 @@ let arrivalTarget = null;
 const WALK_SPEED_MPS = 1.4;
 const DRIVE_SPEED_MPS = 8.3;
 
-const NAV_ZOOM = 18;
+const NAV_ZOOM = 22;
 
 const SNAP_RADIUS_METERS = 40;
 const SNAP_MAX_CANDIDATES = 10;
