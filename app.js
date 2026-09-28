@@ -1,9 +1,9 @@
-mapboxgl.accessToken = 'pk.eyJ1IjoibWFyay10ZWUiLCJhIjoiY21zN2l3cHk2MDRjazM5cGxpc2hnbmY1cSJ9.VdHqEZXBn5LJ4QvFkUAtXw';
+mapboxgl.accessToken = 'pk.eyJ1IjoibWFyay10ZWUiLCJhIjoiY21zN2l3cHk2MDRjazM5cGxpc2hnbmY1cSJ9.VdHqEZXBn5LJ4QvFkUAtXw'; 
 
 const map = new mapboxgl.Map({
   container: 'map',
   style: 'mapbox://styles/mapbox/standard',
-  center: [3.82550, 7.24072],
+  center: [3.82550, 7.24072], // ⚠️ MANUAL INPUT NEEDED: your real campus coordinates
   zoom: 16,
   pitch: 60,
   bearing: -20
@@ -23,7 +23,25 @@ let arrivalTarget = null;
 const WALK_SPEED_MPS = 1.4;
 const DRIVE_SPEED_MPS = 8.3;
 
-const NAV_ZOOM = 17;
+
+const NAV_ZOOM_WALK = 15;
+const NAV_ZOOM_DRIVE = 14;
+
+function getNavZoom() {
+  return currentMode === 'drive' ? NAV_ZOOM_DRIVE : NAV_ZOOM_WALK;
+}
+
+
+const GROUND_COLOR = '#c5e6b8';
+
+const BUILDING_COLORS = {
+  hostel: '#2e7d32',
+  blocks: '#8899aa',
+  health: '#ffffff',
+  academic: '#1e88e5',
+  admin: '#8e44ad',
+  other: '#f9d648'
+};
 
 const SNAP_RADIUS_METERS = 40;
 const SNAP_MAX_CANDIDATES = 10;
@@ -81,12 +99,57 @@ function normalizeName(name) {
 }
 
 
+function getBuildingColor(name) {
+  if (!name) return BUILDING_COLORS.other;
+  const n = name.toUpperCase();
+
+  if (n.includes('HOSTEL')) return BUILDING_COLORS.hostel;
+  if (n.includes('SALEM')) return BUILDING_COLORS.blocks;
+  if (n.includes('HEALTH')) return BUILDING_COLORS.health;
+  if (n.includes('ADMINISTRATIVE') || n.includes('REGISTRY')) return BUILDING_COLORS.admin;
+  if (
+    n.includes('OFFICE COMPLEX') ||
+    n.includes('BIOLOGICAL') ||
+    n.includes('ENGINEERING') ||
+    n.includes('NATURAL AND APPLIED') ||
+    n.includes('ENVIRONMENTAL') ||
+    n.includes('LECTURE THEATRE')
+  ) return BUILDING_COLORS.academic;
+
+  return BUILDING_COLORS.other;
+}
+
+
 map.on('load', () => {
 
   map.setConfigProperty('basemap', 'show3dObjects', false);
 
   applyTimeOfDayLighting();
   setInterval(applyTimeOfDayLighting, 15 * 60 * 1000);
+
+  
+  map.addSource('ground-source', {
+    type: 'geojson',
+    data: {
+      type: 'Feature',
+      geometry: {
+        type: 'Polygon',
+        coordinates: [[[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]]]
+      },
+      properties: {}
+    }
+  });
+
+  map.addLayer({
+    id: 'ground-green',
+    type: 'fill',
+    source: 'ground-source',
+    slot: 'bottom',
+    paint: {
+      'fill-color': GROUND_COLOR,
+      'fill-opacity': 1
+    }
+  });
 
   map.addSource('campus-paths', {
     type: 'geojson',
@@ -154,8 +217,10 @@ map.on('load', () => {
       return res.json();
     })
     .then(data => {
+      
       data.features.forEach(feature => {
         feature.properties.Name = normalizeName(feature.properties.Name);
+        feature.properties.baseColor = getBuildingColor(feature.properties.Name);
       });
 
       map.addSource('campus-buildings', {
@@ -163,16 +228,13 @@ map.on('load', () => {
         data: data
       });
 
+      
       map.addLayer({
         id: 'buildings-3d',
         type: 'fill-extrusion',
         source: 'campus-buildings',
         paint: {
-          'fill-extrusion-color': [
-            'match', ['get', 'Name'],
-            '__none__', '#8899aa',
-            '#8899aa'
-          ],
+          'fill-extrusion-color': ['get', 'baseColor'],
           'fill-extrusion-height': ['get', 'Building_H'],
           'fill-extrusion-opacity': 0.9
         }
@@ -406,17 +468,18 @@ function scheduleFollowResume() {
     followMode = true;
     lastHeading = null;
     if (originCoord) {
-      map.easeTo({ center: originCoord, zoom: NAV_ZOOM, duration: 800 });
+      map.easeTo({ center: originCoord, zoom: getNavZoom(), duration: 800 });
     }
   }, FOLLOW_RESUME_DELAY_MS);
 }
+
 
 
 function highlightDestination(name) {
   map.setPaintProperty('buildings-3d', 'fill-extrusion-color', [
     'match', ['get', 'Name'],
     name, '#e63946',
-    '#8899aa'
+    ['get', 'baseColor']
   ]);
   map.setPaintProperty('buildings-3d', 'fill-extrusion-height', [
     'match', ['get', 'Name'],
@@ -425,8 +488,9 @@ function highlightDestination(name) {
   ]);
 }
 
+// CHANGED: clearing now restores each building's category colour.
 function clearHighlight() {
-  map.setPaintProperty('buildings-3d', 'fill-extrusion-color', '#8899aa');
+  map.setPaintProperty('buildings-3d', 'fill-extrusion-color', ['get', 'baseColor']);
   map.setPaintProperty('buildings-3d', 'fill-extrusion-height', ['get', 'Building_H']);
 }
 
@@ -454,7 +518,7 @@ function startLiveLocation() {
       }
 
       if (followMode) {
-        const zoomTarget = navigationActive ? NAV_ZOOM : map.getZoom();
+        const zoomTarget = navigationActive ? getNavZoom() : map.getZoom();
         map.easeTo({ center: liveCoord, zoom: zoomTarget, duration: 800 });
       }
 
@@ -763,7 +827,7 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
   showBuildingPhoto(destName);
 
   map.stop();
-  map.easeTo({ center: originCoord, zoom: NAV_ZOOM, duration: 800 });
+  map.easeTo({ center: originCoord, zoom: getNavZoom(), duration: 800 });
 
   const startBtn = document.getElementById('start-nav-btn');
   startBtn.textContent = 'Navigating — follow the blue line';
@@ -793,7 +857,7 @@ document.getElementById('recenter-btn').addEventListener('click', () => {
   lastHeading = null;
   clearTimeout(followResumeTimer);
   map.stop();
-  const zoomTarget = navigationActive ? NAV_ZOOM : map.getZoom();
+  const zoomTarget = navigationActive ? getNavZoom() : map.getZoom();
   map.easeTo({ center: originCoord, zoom: zoomTarget, duration: 800 });
 });
 
