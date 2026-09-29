@@ -1,9 +1,9 @@
-mapboxgl.accessToken = 'pk.eyJ1IjoibWFyay10ZWUiLCJhIjoiY21zN2l3cHk2MDRjazM5cGxpc2hnbmY1cSJ9.VdHqEZXBn5LJ4QvFkUAtXw'; 
+mapboxgl.accessToken = 'pk.eyJ1IjoibWFyay10ZWUiLCJhIjoiY21zN2l3cHk2MDRjazM5cGxpc2hnbmY1cSJ9.VdHqEZXBn5LJ4QvFkUAtXw';
 
 const map = new mapboxgl.Map({
   container: 'map',
   style: 'mapbox://styles/mapbox/standard',
-  center: [3.82550, 7.24072], // ⚠️ MANUAL INPUT NEEDED: your real campus coordinates
+  center: [3.82550, 7.24072],
   zoom: 16,
   pitch: 60,
   bearing: -20
@@ -23,14 +23,12 @@ let arrivalTarget = null;
 const WALK_SPEED_MPS = 1.4;
 const DRIVE_SPEED_MPS = 8.3;
 
-
-const NAV_ZOOM_WALK = 15;
-const NAV_ZOOM_DRIVE = 14;
+const NAV_ZOOM_WALK = 18.5;
+const NAV_ZOOM_DRIVE = 17.5;
 
 function getNavZoom() {
   return currentMode === 'drive' ? NAV_ZOOM_DRIVE : NAV_ZOOM_WALK;
 }
-
 
 const GROUND_COLOR = '#c5e6b8';
 
@@ -40,6 +38,8 @@ const BUILDING_COLORS = {
   health: '#ffffff',
   academic: '#1e88e5',
   admin: '#8e44ad',
+  security: '#e63946',
+  toilet: '#f57c00',
   other: '#f9d648'
 };
 
@@ -98,11 +98,12 @@ function normalizeName(name) {
   return name.trim().replace(/\s+/g, ' ');
 }
 
-
 function getBuildingColor(name) {
   if (!name) return BUILDING_COLORS.other;
   const n = name.toUpperCase();
 
+  if (n.includes('SECURITY')) return BUILDING_COLORS.security;
+  if (n.includes('TOILET')) return BUILDING_COLORS.toilet;
   if (n.includes('HOSTEL')) return BUILDING_COLORS.hostel;
   if (n.includes('SALEM')) return BUILDING_COLORS.blocks;
   if (n.includes('HEALTH')) return BUILDING_COLORS.health;
@@ -113,7 +114,8 @@ function getBuildingColor(name) {
     n.includes('ENGINEERING') ||
     n.includes('NATURAL AND APPLIED') ||
     n.includes('ENVIRONMENTAL') ||
-    n.includes('LECTURE THEATRE')
+    n.includes('LECTURE THEATRE') ||
+    n.includes('LABORATORY AND WORKSHOP')
   ) return BUILDING_COLORS.academic;
 
   return BUILDING_COLORS.other;
@@ -127,7 +129,6 @@ map.on('load', () => {
   applyTimeOfDayLighting();
   setInterval(applyTimeOfDayLighting, 15 * 60 * 1000);
 
-  
   map.addSource('ground-source', {
     type: 'geojson',
     data: {
@@ -217,7 +218,6 @@ map.on('load', () => {
       return res.json();
     })
     .then(data => {
-      
       data.features.forEach(feature => {
         feature.properties.Name = normalizeName(feature.properties.Name);
         feature.properties.baseColor = getBuildingColor(feature.properties.Name);
@@ -228,7 +228,6 @@ map.on('load', () => {
         data: data
       });
 
-      
       map.addLayer({
         id: 'buildings-3d',
         type: 'fill-extrusion',
@@ -474,7 +473,6 @@ function scheduleFollowResume() {
 }
 
 
-
 function highlightDestination(name) {
   map.setPaintProperty('buildings-3d', 'fill-extrusion-color', [
     'match', ['get', 'Name'],
@@ -488,7 +486,6 @@ function highlightDestination(name) {
   ]);
 }
 
-// CHANGED: clearing now restores each building's category colour.
 function clearHighlight() {
   map.setPaintProperty('buildings-3d', 'fill-extrusion-color', ['get', 'baseColor']);
   map.setPaintProperty('buildings-3d', 'fill-extrusion-height', ['get', 'Building_H']);
