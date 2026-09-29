@@ -107,9 +107,12 @@ function getBuildingColor(name) {
   if (n.includes('HOSTEL')) return BUILDING_COLORS.hostel;
   if (n.includes('SALEM')) return BUILDING_COLORS.blocks;
   if (n.includes('HEALTH')) return BUILDING_COLORS.health;
-  if (n.includes('ADMINISTRATIVE') || n.includes('REGISTRY')) return BUILDING_COLORS.admin;
   if (
-    n.includes('COMPLEX') ||
+    n.includes('ADMINISTRATIVE') ||
+     n.includes('COMPLEX') || 
+    n.includes('REGISTRY')) return BUILDING_COLORS.admin;
+  if (
+    n.includes('ACADEMIC') ||
     n.includes('BIOLOGICAL') ||
     n.includes('ENGINEERING') ||
     n.includes('NATURAL AND APPLIED') ||
