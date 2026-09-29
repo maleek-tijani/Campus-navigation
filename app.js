@@ -110,7 +110,8 @@ function getBuildingColor(name) {
   if (
     n.includes('ADMINISTRATIVE') ||
     n.includes('COMPLEX') || 
-    n.includes('REGISTRY')) return BUILDING_COLORS.admin;
+    n.includes('REGISTRY')
+  ) return BUILDING_COLORS.admin;
   if (
     n.includes('ACADEMIC') ||
     n.includes('BIOLOGICAL') ||
