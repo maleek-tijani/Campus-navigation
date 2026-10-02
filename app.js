@@ -1,13 +1,6 @@
-// =====================================================================
-// MANUAL INPUT 1 of 3: your Mapbox public access token (starts with pk.)
-// =====================================================================
+
 mapboxgl.accessToken = 'pk.eyJ1IjoibWFyay10ZWUiLCJhIjoiY21zN2l3cHk2MDRjazM5cGxpc2hnbmY1cSJ9.VdHqEZXBn5LJ4QvFkUAtXw';
 
-// =====================================================================
-// MANUAL INPUT 2 of 3: coordinates of the centre of the school
-// Format is [longitude, latitude] - longitude FIRST.
-// Replace YOUR_LONGITUDE and YOUR_LATITUDE with the real numbers.
-// =====================================================================
 const map = new mapboxgl.Map({
   container: 'map',
   style: 'mapbox://styles/mapbox/standard',
@@ -46,7 +39,7 @@ const BUILDING_COLORS = {
   health: '#ffffff',
   academic: '#1e88e5',
   admin: '#8e44ad',
-  security: '#e63946',
+  security: '#5a14dd',
   toilet: '#f57c00',
   other: '#f9d648'
 };
@@ -54,20 +47,8 @@ const BUILDING_COLORS = {
 const SNAP_RADIUS_METERS = 40;
 const SNAP_MAX_CANDIDATES = 10;
 
-// ---------------------------------------------------------------------
-// OUTSIDE-CAMPUS ROUTING SETTINGS
-// ---------------------------------------------------------------------
-
-// If you are further than this from every campus network node, you count as "outside"
 const OUTSIDE_THRESHOLD_METERS = 100;
 
-// =====================================================================
-// MANUAL INPUT 3 of 3: your campus gate coordinates, [longitude, latitude]
-// Replace the 0.000000 values with the real gate coordinates.
-// For more gates, add extra lines in the same format, for example:
-//   { name: 'Back Gate', coord: [lng, lat] },
-// Put each gate ON or very close to a campus road in your network.
-// =====================================================================
 const CAMPUS_GATES = [
   { name: 'Main Gate', coord: [3.820382,7.241511] }
 ];
@@ -133,9 +114,13 @@ function getBuildingColor(name) {
   if (n.includes('HOSTEL')) return BUILDING_COLORS.hostel;
   if (n.includes('SALEM')) return BUILDING_COLORS.blocks;
   if (n.includes('HEALTH')) return BUILDING_COLORS.health;
-  if (n.includes('ADMINISTRATIVE') || n.includes('REGISTRY')) return BUILDING_COLORS.admin;
   if (
+    n.includes('ADMINISTRATIVE') ||
     n.includes('OFFICE COMPLEX') ||
+    n.includes('REGISTRY')
+  ) return BUILDING_COLORS.admin;
+  if (
+    n.includes('ACADEMIC') ||
     n.includes('BIOLOGICAL') ||
     n.includes('ENGINEERING') ||
     n.includes('NATURAL AND APPLIED') ||
@@ -152,8 +137,7 @@ map.on('load', () => {
 
   map.setConfigProperty('basemap', 'show3dObjects', false);
 
-  // NEW: turn on the enhanced road detail (lane markings, crossings, 3D bridges).
-  // Needs Mapbox GL JS v3.30 or later, and only shows where Mapbox has coverage.
+  
   map.setConfigProperty('basemap', 'showHdRoads', true);
 
   applyTimeOfDayLighting();
@@ -830,8 +814,6 @@ document.getElementById('search-btn').addEventListener('click', () => {
 
   updateStatus('Calculating route...');
 
-  // calculateAndDrawRoute is now async (it may call the Directions API),
-  // so we attach .catch to make sure an unexpected error is shown, not lost.
   calculateAndDrawRoute().catch(err => {
     console.error('Route calculation failed:', err);
     updateStatus('Something went wrong while calculating the route. Please try again.');
@@ -992,19 +974,13 @@ function calculateWeightedMinutes(routeCoords, edgeRealArray, mode) {
 }
 
 
-// =====================================================================
-// OUTSIDE-CAMPUS ROUTING (new)
-// =====================================================================
-
-// True if the given point is further than OUTSIDE_THRESHOLD_METERS from every
-// node of the campus network (i.e. the user is not on campus).
 function isOutsideCampus(coord) {
   const nearestList = findNearestNodes(networkGraph, coord);
   if (nearestList.length === 0) return false;
   return nearestList[0].dist > OUTSIDE_THRESHOLD_METERS;
 }
 
-// Asks the Mapbox Directions API for a road/footpath route between two points.
+
 async function fetchExternalRoute(from, to, mode) {
   const profile = mode === 'drive' ? 'driving' : 'walking';
   const url =
@@ -1023,8 +999,7 @@ async function fetchExternalRoute(from, to, mode) {
   };
 }
 
-// Finds the best route from the user's position to one of the campus gates.
-// Tries the two gates nearest in a straight line and keeps the shorter real route.
+
 async function planOutsideLeg(origin, mode) {
   if (CAMPUS_GATES.length === 0) return null;
 
@@ -1050,7 +1025,7 @@ async function planOutsideLeg(origin, mode) {
 async function calculateAndDrawRoute() {
   const graph = networkGraph;
 
-  // ----- Outside leg (only if the user is not on campus) -----
+  
   let campusStart = originCoord;
   let outsideCoords = [];
   let outsideIsReal = true;
@@ -1067,17 +1042,17 @@ async function calculateAndDrawRoute() {
 
     if (leg) {
       campusStart = leg.gate.coord;
-      // add the exact gate point at the end so the two legs join without a gap
+      
       outsideCoords = [...leg.coords, leg.gate.coord];
     } else {
-      // fallback: straight dashed guide line from the user to the campus network
+      
       outsideCoords = [originCoord];
       outsideIsReal = false;
       usedFallback = true;
     }
   }
 
-  // ----- Inside leg (existing logic, starting from campusStart) -----
+  
   const startCandidates = findNearestNodes(graph, campusStart);
   const endCandidates = findNearestNodes(graph, destCoord);
 
@@ -1110,7 +1085,7 @@ async function calculateAndDrawRoute() {
 
   const campusEdgeReal = buildEdgeRealArray(graph, bestRoute, currentMode);
 
-  // ----- Join the two legs into one route -----
+  
   const fullRoute = [...outsideCoords, ...bestRoute];
   const fullEdgeReal = [
     ...new Array(outsideCoords.length).fill(outsideIsReal),
