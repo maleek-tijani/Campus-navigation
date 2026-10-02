@@ -69,7 +69,7 @@ const OUTSIDE_THRESHOLD_METERS = 100;
 // Put each gate ON or very close to a campus road in your network.
 // =====================================================================
 const CAMPUS_GATES = [
-  { name: 'Main Gate', coord: [3.823170,7.241885] }
+  { name: 'Main Gate', coord: [3.820382,7.241511] }
 ];
 
 let buildingList = [];
