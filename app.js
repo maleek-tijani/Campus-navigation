@@ -1,5 +1,13 @@
+// =====================================================================
+// MANUAL INPUT 1 of 3: your Mapbox public access token (starts with pk.)
+// =====================================================================
 mapboxgl.accessToken = 'pk.eyJ1IjoibWFyay10ZWUiLCJhIjoiY21zN2l3cHk2MDRjazM5cGxpc2hnbmY1cSJ9.VdHqEZXBn5LJ4QvFkUAtXw';
 
+// =====================================================================
+// MANUAL INPUT 2 of 3: coordinates of the centre of the school
+// Format is [longitude, latitude] - longitude FIRST.
+// Replace YOUR_LONGITUDE and YOUR_LATITUDE with the real numbers.
+// =====================================================================
 const map = new mapboxgl.Map({
   container: 'map',
   style: 'mapbox://styles/mapbox/standard',
@@ -45,6 +53,24 @@ const BUILDING_COLORS = {
 
 const SNAP_RADIUS_METERS = 40;
 const SNAP_MAX_CANDIDATES = 10;
+
+// ---------------------------------------------------------------------
+// OUTSIDE-CAMPUS ROUTING SETTINGS
+// ---------------------------------------------------------------------
+
+// If you are further than this from every campus network node, you count as "outside"
+const OUTSIDE_THRESHOLD_METERS = 100;
+
+// =====================================================================
+// MANUAL INPUT 3 of 3: your campus gate coordinates, [longitude, latitude]
+// Replace the 0.000000 values with the real gate coordinates.
+// For more gates, add extra lines in the same format, for example:
+//   { name: 'Back Gate', coord: [lng, lat] },
+// Put each gate ON or very close to a campus road in your network.
+// =====================================================================
+const CAMPUS_GATES = [
+  { name: 'Main Gate', coord: [3.823170,7.241885] }
+];
 
 let buildingList = [];
 
@@ -107,13 +133,9 @@ function getBuildingColor(name) {
   if (n.includes('HOSTEL')) return BUILDING_COLORS.hostel;
   if (n.includes('SALEM')) return BUILDING_COLORS.blocks;
   if (n.includes('HEALTH')) return BUILDING_COLORS.health;
+  if (n.includes('ADMINISTRATIVE') || n.includes('REGISTRY')) return BUILDING_COLORS.admin;
   if (
-    n.includes('ADMINISTRATIVE') ||
-    n.includes('COMPLEX') || 
-    n.includes('REGISTRY')
-  ) return BUILDING_COLORS.admin;
-  if (
-    n.includes('ACADEMIC') ||
+    n.includes('OFFICE COMPLEX') ||
     n.includes('BIOLOGICAL') ||
     n.includes('ENGINEERING') ||
     n.includes('NATURAL AND APPLIED') ||
@@ -129,6 +151,10 @@ function getBuildingColor(name) {
 map.on('load', () => {
 
   map.setConfigProperty('basemap', 'show3dObjects', false);
+
+  // NEW: turn on the enhanced road detail (lane markings, crossings, 3D bridges).
+  // Needs Mapbox GL JS v3.30 or later, and only shows where Mapbox has coverage.
+  map.setConfigProperty('basemap', 'showHdRoads', true);
 
   applyTimeOfDayLighting();
   setInterval(applyTimeOfDayLighting, 15 * 60 * 1000);
@@ -803,7 +829,13 @@ document.getElementById('search-btn').addEventListener('click', () => {
   }
 
   updateStatus('Calculating route...');
-  calculateAndDrawRoute();
+
+  // calculateAndDrawRoute is now async (it may call the Directions API),
+  // so we attach .catch to make sure an unexpected error is shown, not lost.
+  calculateAndDrawRoute().catch(err => {
+    console.error('Route calculation failed:', err);
+    updateStatus('Something went wrong while calculating the route. Please try again.');
+  });
 
   document.getElementById('search-controls').classList.add('hidden');
   document.getElementById('nav-controls').classList.remove('hidden');
@@ -959,10 +991,94 @@ function calculateWeightedMinutes(routeCoords, edgeRealArray, mode) {
   return Math.max(1, Math.round(totalSeconds / 60));
 }
 
-function calculateAndDrawRoute() {
+
+// =====================================================================
+// OUTSIDE-CAMPUS ROUTING (new)
+// =====================================================================
+
+// True if the given point is further than OUTSIDE_THRESHOLD_METERS from every
+// node of the campus network (i.e. the user is not on campus).
+function isOutsideCampus(coord) {
+  const nearestList = findNearestNodes(networkGraph, coord);
+  if (nearestList.length === 0) return false;
+  return nearestList[0].dist > OUTSIDE_THRESHOLD_METERS;
+}
+
+// Asks the Mapbox Directions API for a road/footpath route between two points.
+async function fetchExternalRoute(from, to, mode) {
+  const profile = mode === 'drive' ? 'driving' : 'walking';
+  const url =
+    `https://api.mapbox.com/directions/v5/mapbox/${profile}/` +
+    `${from[0]},${from[1]};${to[0]},${to[1]}` +
+    `?geometries=geojson&overview=full&access_token=${mapboxgl.accessToken}`;
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Directions API responded with ${res.status}`);
+  const data = await res.json();
+  if (!data.routes || data.routes.length === 0) throw new Error('No external route found');
+
+  return {
+    coords: data.routes[0].geometry.coordinates,
+    distance: data.routes[0].distance
+  };
+}
+
+// Finds the best route from the user's position to one of the campus gates.
+// Tries the two gates nearest in a straight line and keeps the shorter real route.
+async function planOutsideLeg(origin, mode) {
+  if (CAMPUS_GATES.length === 0) return null;
+
+  const nearestGates = [...CAMPUS_GATES]
+    .sort((a, b) =>
+      turf.distance(origin, a.coord, { units: 'meters' }) -
+      turf.distance(origin, b.coord, { units: 'meters' }))
+    .slice(0, 2);
+
+  const results = await Promise.allSettled(
+    nearestGates.map(g =>
+      fetchExternalRoute(origin, g.coord, mode).then(r => ({ ...r, gate: g }))
+    )
+  );
+
+  const ok = results.filter(r => r.status === 'fulfilled').map(r => r.value);
+  if (ok.length === 0) return null;
+
+  ok.sort((a, b) => a.distance - b.distance);
+  return ok[0];
+}
+
+async function calculateAndDrawRoute() {
   const graph = networkGraph;
 
-  const startCandidates = findNearestNodes(graph, originCoord);
+  // ----- Outside leg (only if the user is not on campus) -----
+  let campusStart = originCoord;
+  let outsideCoords = [];
+  let outsideIsReal = true;
+  let usedFallback = false;
+
+  if (isOutsideCampus(originCoord)) {
+    updateStatus('You are outside campus. Finding a route to the gate...');
+    let leg = null;
+    try {
+      leg = await planOutsideLeg(originCoord, currentMode);
+    } catch (err) {
+      console.error('Outside leg failed:', err);
+    }
+
+    if (leg) {
+      campusStart = leg.gate.coord;
+      // add the exact gate point at the end so the two legs join without a gap
+      outsideCoords = [...leg.coords, leg.gate.coord];
+    } else {
+      // fallback: straight dashed guide line from the user to the campus network
+      outsideCoords = [originCoord];
+      outsideIsReal = false;
+      usedFallback = true;
+    }
+  }
+
+  // ----- Inside leg (existing logic, starting from campusStart) -----
+  const startCandidates = findNearestNodes(graph, campusStart);
   const endCandidates = findNearestNodes(graph, destCoord);
 
   let bestRoute = null;
@@ -992,19 +1108,28 @@ function calculateAndDrawRoute() {
     return;
   }
 
-  const edgeReal = buildEdgeRealArray(graph, bestRoute, currentMode);
+  const campusEdgeReal = buildEdgeRealArray(graph, bestRoute, currentMode);
 
-  drawRouteSegmented(bestRoute, edgeReal);
+  // ----- Join the two legs into one route -----
+  const fullRoute = [...outsideCoords, ...bestRoute];
+  const fullEdgeReal = [
+    ...new Array(outsideCoords.length).fill(outsideIsReal),
+    ...campusEdgeReal
+  ];
 
-  currentRoute = bestRoute;
-  routeEdgeReal = edgeReal;
-  arrivalTarget = bestRoute[bestRoute.length - 1];
-  turnPoints = computeTurnPoints(bestRoute);
+  drawRouteSegmented(fullRoute, fullEdgeReal);
 
-  const totalMeters = bestTotal;
-  const minutes = calculateWeightedMinutes(bestRoute, edgeReal, currentMode);
+  currentRoute = fullRoute;
+  routeEdgeReal = fullEdgeReal;
+  arrivalTarget = fullRoute[fullRoute.length - 1];
+  turnPoints = computeTurnPoints(fullRoute);
 
-  const hasWalkFallback = currentMode === 'drive' && edgeReal.includes(false);
+  const totalMeters = outsideCoords.length > 0
+    ? calculateTotalDistance(fullRoute)
+    : bestTotal;
+  const minutes = calculateWeightedMinutes(fullRoute, fullEdgeReal, currentMode);
+
+  const hasWalkFallback = currentMode === 'drive' && fullEdgeReal.includes(false);
 
   document.getElementById('route-summary').textContent =
     `${Math.round(totalMeters)}m • approx. ${minutes} min ${currentMode === 'walk' ? 'walk' : 'drive'}`;
@@ -1012,7 +1137,9 @@ function calculateAndDrawRoute() {
   document.getElementById('start-nav-btn').disabled = false;
   document.getElementById('recenter-btn').disabled = false;
 
-  if (hasWalkFallback) {
+  if (usedFallback) {
+    updateStatus('Could not get road directions. The dashed line is a straight-line guide to campus.');
+  } else if (hasWalkFallback) {
     updateStatus('Route ready. Part of this trip must be walked (shown in orange).');
   } else {
     updateStatus('Route ready. Tap Start Navigation when you\'re ready to go.');
